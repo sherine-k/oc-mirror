@@ -792,6 +792,7 @@ func newSystemContext(skipTLS bool, registriesConfigPath string) *types.SystemCo
 		VariantChoice:               "",
 		BigFilesTemporaryDir:        "", //*globalArgs.cache + "/tmp",
 		DockerInsecureSkipTLSVerify: skipTLSVerify,
+		OCIInsecureSkipTLSVerify:    skipTLS,
 	}
 	if registriesConfigPath != "" {
 		ctx.SystemRegistriesConfPath = registriesConfigPath
