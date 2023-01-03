@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
@@ -150,7 +149,7 @@ func (o *OperatorOptions) createRegistry() (*containerdregistry.Registry, error)
 	}
 
 	logger := logrus.New()
-	logger.SetOutput(ioutil.Discard)
+	logger.SetOutput(io.Discard)
 	nullLogger := logrus.NewEntry(logger)
 
 	return containerdregistry.NewRegistry(
