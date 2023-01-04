@@ -114,11 +114,16 @@ func (o *MirrorOptions) bulkImageCopy(ctx context.Context, isc *v1alpha2.ImageSe
 		if err != nil {
 			return fmt.Errorf("error parsing catalog: %v", err)
 		}
-		ctlgRef, err := imagesource.ParseReference(operator.OriginalRef)
+		ctlgRef, err := imagesource.ParseReference(operator.Catalog)
 		if err != nil {
 			return fmt.Errorf("error parsing catalog: %v", err)
 		}
-
+		if operator.OriginalRef != "" { //prefer to use OriginalRef if present
+			ctlgRef, err = imagesource.ParseReference(operator.OriginalRef)
+			if err != nil {
+				return fmt.Errorf("error parsing catalog: %v", err)
+			}
+		}
 		ic, err := operator.IncludeConfig.ConvertToDiffIncludeConfig()
 		if err != nil {
 			return fmt.Errorf("error during include config conversion to declarative config: %v", err)
