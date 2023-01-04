@@ -716,7 +716,6 @@ func TestPushImage(t *testing.T) {
 func TestGetISConfig(t *testing.T) {
 	type spec struct {
 		desc        string
-		isc         *v1alpha2.ImageSetConfiguration
 		options     *MirrorOptions
 		err         string
 		expectedErr string

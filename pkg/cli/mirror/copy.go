@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
@@ -27,10 +26,14 @@ import (
 	"github.com/containers/image/v5/types"
 	"github.com/openshift/oc-mirror/pkg/api/v1alpha2"
 	"github.com/openshift/oc-mirror/pkg/image"
+	"github.com/openshift/oc-mirror/pkg/operator/diff"
+	"github.com/openshift/oc/pkg/cli/image/imagesource"
 	"github.com/operator-framework/operator-registry/alpha/declcfg"
 	"github.com/operator-framework/operator-registry/alpha/property"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/yaml"
+
+	"github.com/openshift/oc-mirror/pkg/config"
 )
 
 const (
@@ -58,7 +61,7 @@ type RemoteRegFuncs struct {
 // set via the command line
 func (o *MirrorOptions) getISConfig() (*v1alpha2.ImageSetConfiguration, error) {
 	var isc *v1alpha2.ImageSetConfiguration
-	configData, err := ioutil.ReadFile(o.ConfigPath)
+	configData, err := os.ReadFile(o.ConfigPath)
 	if err != nil {
 		return nil, err
 	}
@@ -95,6 +98,50 @@ func (o *MirrorOptions) bulkImageCopy(ctx context.Context, isc *v1alpha2.ImageSe
 			return fmt.Errorf("copying catalog image %s : %v", operator.Catalog, err)
 		}
 
+		//OCPBUGS-5085
+		opOpts := NewOperatorOptions(o)
+		opOpts.complete()
+		reg, err := opOpts.createRegistry()
+		if err != nil {
+			return fmt.Errorf("error creating container registry: %v", err)
+		}
+
+		targetName, err := operator.GetUniqueName()
+		if err != nil {
+			return err
+		}
+		targetCtlg, err := imagesource.ParseReference(targetName)
+		if err != nil {
+			return fmt.Errorf("error parsing catalog: %v", err)
+		}
+		ctlgRef, err := imagesource.ParseReference(operator.OriginalRef)
+		if err != nil {
+			return fmt.Errorf("error parsing catalog: %v", err)
+		}
+
+		ic, err := operator.IncludeConfig.ConvertToDiffIncludeConfig()
+		if err != nil {
+			return fmt.Errorf("error during include config conversion to declarative config: %v", err)
+		}
+		catLogger := opOpts.Logger.WithField("catalog", operator.Catalog)
+		a := diff.Diff{
+			Registry:         reg,
+			NewRefs:          []string{operator.Catalog},
+			Logger:           catLogger,
+			SkipDependencies: operator.SkipDependencies,
+		}
+		a.IncludeConfig = ic
+		dc, err := a.Run(ctx)
+		if err != nil {
+			return err
+		}
+		if _, err = opOpts.writeConfigs(dc, operator.IncludeConfig, targetCtlg.Ref); err != nil {
+			return err
+		}
+		if err := opOpts.writeLayout(ctx, ctlgRef.Ref, targetCtlg.Ref); err != nil {
+			return err
+		}
+		//End OCPBUGS-5085
 		// find the layer with the FB config
 		catalogContentsDir := filepath.Join(artifactsPath, repo)
 		klog.Infof("Finding file based config for %s (in catalog layers)\n", operator.Catalog)
@@ -227,6 +274,15 @@ func (o *MirrorOptions) bulkImageMirror(ctx context.Context, isc *v1alpha2.Image
 		}
 
 	}
+	//OCPBUGS-5085
+	if len(isc.Mirror.Operators) > 0 {
+		ctlgRefs, err := o.rebuildCatalogs(ctx, filepath.Join(o.Dir, config.SourceDir))
+		if err != nil {
+			return fmt.Errorf("error rebuilding catalog images from file-based catalogs: %v", err)
+		}
+		catalogMapping.Merge(ctlgRefs)
+	}
+	//End OCPBUGS-5085
 	err := o.remoteRegFuncs.mirrorMappings(*isc, mapping, o.DestSkipTLS)
 	if err != nil {
 		return err
@@ -532,7 +588,7 @@ func (o *MirrorOptions) getCatalogConfigPath(ctx context.Context, imagePath stri
 func getConfigPathFromConfigLayer(imagePath, configSha string) (string, error) {
 	var cfg *manifest.Schema2V1Image
 	configLayerDir := configSha[7:]
-	cfgBlob, err := ioutil.ReadFile(filepath.Join(imagePath, blobsPath, configLayerDir))
+	cfgBlob, err := os.ReadFile(filepath.Join(imagePath, blobsPath, configLayerDir))
 	if err != nil {
 		return "", fmt.Errorf("unable to read the config blob %s from the oci image: %w", configLayerDir, err)
 	}
