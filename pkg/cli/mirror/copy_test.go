@@ -389,7 +389,7 @@ func TestGetRelatedImages(t *testing.T) {
 	}
 }
 
-func TestIsPackageSelected(t *testing.T) {
+func TestIsBundleSelected(t *testing.T) {
 	type spec struct {
 		desc           string
 		bundle         declcfg.Bundle
@@ -571,6 +571,90 @@ func TestIsPackageSelected(t *testing.T) {
 			err:            "",
 		},
 		{
+			desc: "bundle is in includeChannel returns true",
+			bundle: declcfg.Bundle{
+				Name:    "foo.v0.3.1",
+				Package: "foo",
+				Image:   "quay.io/redhatgov/oc-mirror-dev:foo-bundle-v0.3.1",
+				RelatedImages: []declcfg.RelatedImage{
+					{
+						Name:  "operator",
+						Image: "quay.io/redhatgov/oc-mirror-dev@sha256:00aef3f7bd9bea8f627dbf46d2d062010ed7d8b208a98da389b701c3cae90026",
+					},
+				},
+				Properties: []property.Property{
+					property.MustBuildPackage("foo", "0.3.1"),
+				},
+			},
+			channels: []declcfg.Channel{
+				{
+					Schema:  "olm.channel",
+					Name:    "stable",
+					Package: "foo",
+					Entries: []declcfg.ChannelEntry{
+						{
+							Name:      "foo.v0.3.1",
+							SkipRange: ">=4.11.0 <4.11.0",
+						},
+					},
+				},
+			},
+			packages: []v1alpha2.IncludePackage{
+				{
+					Name: "foo",
+					Channels: []v1alpha2.IncludeChannel{
+						{
+							Name: "stable",
+						},
+					},
+				},
+			},
+			expectedResult: true,
+			err:            "",
+		},
+		{
+			desc: "bundle not in includeChannel returns false",
+			bundle: declcfg.Bundle{
+				Name:    "foo.v0.3.1",
+				Package: "foo",
+				Image:   "quay.io/redhatgov/oc-mirror-dev:foo-bundle-v0.3.1",
+				RelatedImages: []declcfg.RelatedImage{
+					{
+						Name:  "operator",
+						Image: "quay.io/redhatgov/oc-mirror-dev@sha256:00aef3f7bd9bea8f627dbf46d2d062010ed7d8b208a98da389b701c3cae90026",
+					},
+				},
+				Properties: []property.Property{
+					property.MustBuildPackage("foo", "0.3.1"),
+				},
+			},
+			channels: []declcfg.Channel{
+				{
+					Schema:  "olm.channel",
+					Name:    "stable",
+					Package: "foo",
+					Entries: []declcfg.ChannelEntry{
+						{
+							Name:      "foo.v1.0.0",
+							SkipRange: ">=4.11.0 <4.11.0",
+						},
+					},
+				},
+			},
+			packages: []v1alpha2.IncludePackage{
+				{
+					Name: "foo",
+					Channels: []v1alpha2.IncludeChannel{
+						{
+							Name: "stable",
+						},
+					},
+				},
+			},
+			expectedResult: false,
+			err:            "",
+		},
+		{
 			desc: "No version range in IncludePackage returns true",
 			bundle: declcfg.Bundle{
 				Name:    "foo.v0.3.1",
@@ -628,13 +712,148 @@ func TestIsPackageSelected(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.desc, func(t *testing.T) {
 
-			isSelected, err := isPackageSelected(c.bundle, c.channels, c.packages)
+			isSelected, err := isBundleSelected(c.bundle, c.channels, c.packages)
 			if c.err != "" {
 				require.EqualError(t, err, c.err)
 			} else {
 				require.NoError(t, err)
 				require.Equal(t, c.expectedResult, isSelected)
 				// require.ElementsMatch(t, c.expectedRelatedImages, relatedImages)
+			}
+
+		})
+	}
+}
+
+func TestFilterDclCfg(t *testing.T) {
+	type spec struct {
+		desc       string
+		path       string
+		packages   []v1alpha2.IncludePackage
+		expectedDC declcfg.DeclarativeConfig
+		err        string
+	}
+
+	cases := []spec{
+		{
+			desc: "Nominal case passes",
+			path: testdata + "/olm_artifacts/configs",
+			packages: []v1alpha2.IncludePackage{
+				{
+					Name: "aws-load-balancer-operator",
+					Channels: []v1alpha2.IncludeChannel{
+						{
+							Name: "stable-v0.1",
+						},
+					},
+				},
+				{
+					Name: "node-observability-operator",
+					IncludeBundle: v1alpha2.IncludeBundle{
+						MinVersion: "0.0.1",
+					},
+				},
+			},
+			err: "",
+			expectedDC: declcfg.DeclarativeConfig{
+				Packages: []declcfg.Package{
+					{
+						Schema:         "olm.package",
+						Name:           "aws-load-balancer-operator",
+						DefaultChannel: "stable-v0.1",
+					},
+					{
+						Schema:         "olm.package",
+						Name:           "node-observability-operator",
+						DefaultChannel: "alpha",
+					},
+				},
+				Channels: []declcfg.Channel{
+					{
+						Schema:  "olm.channel",
+						Name:    "stable-v0.1",
+						Package: "aws-load-balancer-operator",
+						Entries: []declcfg.ChannelEntry{
+							{
+								Name: "aws-load-balancer-operator.v0.0.1",
+							},
+						},
+					},
+					{
+						Schema:  "olm.channel",
+						Name:    "alpha",
+						Package: "node-observability-operator",
+						Entries: []declcfg.ChannelEntry{
+							{
+								Name: "node-observability-operator.v0.1.0",
+							},
+						},
+					},
+				},
+				Bundles: []declcfg.Bundle{
+					{
+						Schema:  "olm.bundle",
+						Name:    "node-observability-operator.v0.1.0",
+						Package: "node-observability-operator",
+						Image:   "registry.redhat.io/noo/node-observability-operator-bundle-rhel8@sha256:25b8e1c8ed635364d4dcba7814ad504570b1c6053d287ab7e26c8d6a97ae3f6a",
+					},
+					{
+						Schema:  "olm.bundle",
+						Name:    "aws-load-balancer-operator.v0.0.1",
+						Package: "aws-load-balancer-operator",
+						Image:   "registry.redhat.io/albo/aws-load-balancer-operator-bundle@sha256:50b9402635dd4b312a86bed05dcdbda8c00120d3789ec2e9b527045100b3bdb4",
+					},
+				},
+			},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.desc, func(t *testing.T) {
+
+			filteredDC, err := filterDeclarativeConfig(c.path, c.packages)
+			if c.err != "" {
+				require.EqualError(t, err, c.err)
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, len(c.expectedDC.Channels), len(filteredDC.Channels))
+				for _, expChan := range c.expectedDC.Channels {
+					found := false
+					for _, channel := range filteredDC.Channels {
+						if channel.Name == expChan.Name && channel.Package == expChan.Package {
+							found = true
+							require.ElementsMatch(t, channel.Entries, expChan.Entries)
+						}
+					}
+					if !found {
+						t.Errorf("expecting channel %s for package %s but didnt find it", expChan.Name, expChan.Package)
+					}
+				}
+				require.Equal(t, len(c.expectedDC.Bundles), len(filteredDC.Bundles))
+				for _, expBdl := range c.expectedDC.Bundles {
+					found := false
+					for _, bdl := range filteredDC.Bundles {
+						if bdl.Name == expBdl.Name && bdl.Package == expBdl.Package {
+							found = true
+							require.Equal(t, bdl.Image, expBdl.Image)
+						}
+					}
+					if !found {
+						t.Errorf("expecting bundle %s for package %s but didnt find it", expBdl.Name, expBdl.Package)
+					}
+				}
+				require.Equal(t, len(c.expectedDC.Packages), len(filteredDC.Packages))
+				for _, expPkg := range c.expectedDC.Packages {
+					found := false
+					for _, pkg := range filteredDC.Packages {
+						if pkg.Name == expPkg.Name {
+							found = true
+							require.Equal(t, pkg.DefaultChannel, expPkg.DefaultChannel)
+						}
+					}
+					if !found {
+						t.Errorf("expecting package %s but didnt find it", expPkg.Name)
+					}
+				}
 			}
 
 		})
@@ -1370,7 +1589,7 @@ func TestGenerateSrcToFileMapping(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 			}
-			require.Equal(t, c.expMapping, mapping)
+			require.ElementsMatch(t, c.expMapping, mapping)
 		})
 	}
 }
@@ -1656,7 +1875,7 @@ func TestAddCatalogToMapping(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 			}
-			require.Equal(t, c.expMapping, mapping)
+			require.ElementsMatch(t, c.expMapping, mapping)
 		})
 	}
 }
@@ -1820,7 +2039,7 @@ func TestAddRelatedImageToMapping(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 			}
-			require.Equal(t, c.expMapping, mapping)
+			require.ElementsMatch(t, c.expMapping, mapping)
 		})
 	}
 }

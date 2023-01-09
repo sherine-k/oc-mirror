@@ -26,8 +26,6 @@ import (
 	"github.com/containers/image/v5/types"
 	"github.com/openshift/oc-mirror/pkg/api/v1alpha2"
 	"github.com/openshift/oc-mirror/pkg/image"
-	"github.com/openshift/oc-mirror/pkg/operator/diff"
-	"github.com/openshift/oc/pkg/cli/image/imagesource"
 	"github.com/operator-framework/operator-registry/alpha/declcfg"
 	"github.com/operator-framework/operator-registry/alpha/property"
 	"k8s.io/klog/v2"
@@ -98,55 +96,6 @@ func (o *MirrorOptions) bulkImageCopy(ctx context.Context, isc *v1alpha2.ImageSe
 			return fmt.Errorf("copying catalog image %s : %v", operator.Catalog, err)
 		}
 
-		//OCPBUGS-5085
-		opOpts := NewOperatorOptions(o)
-		opOpts.complete()
-		reg, err := opOpts.createRegistry()
-		if err != nil {
-			return fmt.Errorf("error creating container registry: %v", err)
-		}
-
-		targetName, err := operator.GetUniqueName()
-		if err != nil {
-			return err
-		}
-		targetCtlg, err := imagesource.ParseReference(targetName)
-		if err != nil {
-			return fmt.Errorf("error parsing catalog: %v", err)
-		}
-		ctlgRef, err := imagesource.ParseReference(operator.Catalog)
-		if err != nil {
-			return fmt.Errorf("error parsing catalog: %v", err)
-		}
-		if operator.OriginalRef != "" { //prefer to use OriginalRef if present
-			ctlgRef, err = imagesource.ParseReference(operator.OriginalRef)
-			if err != nil {
-				return fmt.Errorf("error parsing catalog: %v", err)
-			}
-		}
-		ic, err := operator.IncludeConfig.ConvertToDiffIncludeConfig()
-		if err != nil {
-			return fmt.Errorf("error during include config conversion to declarative config: %v", err)
-		}
-		catLogger := opOpts.Logger.WithField("catalog", operator.Catalog)
-		a := diff.Diff{
-			Registry:         reg,
-			NewRefs:          []string{operator.Catalog},
-			Logger:           catLogger,
-			SkipDependencies: operator.SkipDependencies,
-		}
-		a.IncludeConfig = ic
-		dc, err := a.Run(ctx)
-		if err != nil {
-			return err
-		}
-		if _, err = opOpts.writeConfigs(dc, operator.IncludeConfig, targetCtlg.Ref); err != nil {
-			return err
-		}
-		if err := opOpts.writeLayout(ctx, ctlgRef.Ref, targetCtlg.Ref); err != nil {
-			return err
-		}
-		//End OCPBUGS-5085
 		// find the layer with the FB config
 		catalogContentsDir := filepath.Join(artifactsPath, repo)
 		klog.Infof("Finding file based config for %s (in catalog layers)\n", operator.Catalog)
@@ -167,6 +116,20 @@ func (o *MirrorOptions) bulkImageCopy(ctx context.Context, isc *v1alpha2.ImageSe
 			return err
 		}
 		mapping.Merge(result)
+
+		//OCPBUGS-5085
+		opOpts := NewOperatorOptions(o)
+		filteredCfg, err := filterDeclarativeConfig(ctlgConfigsDir, operator.Packages)
+		if err != nil {
+			return err
+		}
+		ctlgRef, err := image.ParseReference(operator.Catalog)
+		if err != nil {
+			return err
+		}
+		//Should call operatorOptions.writeConfigs in order to write DeclarativeConfig and IncludeConfig to folder oc-mirror-workspace/src/catalogs
+		opOpts.writeConfigs(filteredCfg, operator.IncludeConfig, ctlgRef.Ref)
+		//End OCPBUGS-5085
 	}
 
 	o.Dir = strings.TrimPrefix(o.Dir, o.OutputDir+"/")
@@ -627,7 +590,7 @@ func getRelatedImages(directory string, packages []v1alpha2.IncludePackage) ([]d
 	}
 
 	for _, bundle := range cfg.Bundles {
-		isSelected, err := isPackageSelected(bundle, cfg.Channels, packages)
+		isSelected, err := isBundleSelected(bundle, cfg.Channels, packages)
 		if err != nil {
 			return nil, err
 		}
@@ -653,7 +616,7 @@ func getRelatedImages(directory string, packages []v1alpha2.IncludePackage) ([]d
 	return finalList, nil
 }
 
-func isPackageSelected(bundle declcfg.Bundle, channels []declcfg.Channel, packages []v1alpha2.IncludePackage) (bool, error) {
+func isBundleSelected(bundle declcfg.Bundle, channels []declcfg.Channel, packages []v1alpha2.IncludePackage) (bool, error) {
 	isSelected := false
 	for _, pkg := range packages {
 		if pkg.Name == bundle.Package {
@@ -691,6 +654,18 @@ func isPackageSelected(bundle declcfg.Bundle, channels []declcfg.Channel, packag
 					isSelected = true
 				}
 
+			} else if len(pkg.Channels) > 0 {
+				for _, selectedChannel := range pkg.Channels {
+					for _, aChannel := range channels {
+						if aChannel.Package == pkg.Name && aChannel.Name == selectedChannel.Name {
+							for _, entry := range aChannel.Entries {
+								if entry.Name == bundle.Name {
+									isSelected = true
+								}
+							}
+						}
+					}
+				}
 			} else { // no filtering required
 				isSelected = true
 			}
@@ -712,6 +687,64 @@ func bundleVersion(bundle declcfg.Bundle) (string, error) {
 	return "", fmt.Errorf("unable to find bundle version")
 }
 
+func filter[T any](slice []T, f func(T) bool) []T {
+	var n []T
+	for _, e := range slice {
+		if f(e) {
+			n = append(n, e)
+		}
+	}
+	return n
+}
+
+func filterDeclarativeConfig(path string, packages []v1alpha2.IncludePackage) (*declcfg.DeclarativeConfig, error) {
+	// load the declarative config from the provided directory (if possible)
+	cfg, err := declcfg.LoadFS(os.DirFS(path))
+	if err != nil {
+		return cfg, err
+	}
+	filteredDC := *cfg
+	if len(packages) > 0 {
+		filteredDC.Packages = filter(cfg.Packages, func(pkg declcfg.Package) bool {
+			for _, selectedPkg := range packages {
+				if selectedPkg.Name == pkg.Name {
+					return true
+				}
+			}
+			return false
+		})
+		filteredDC.Bundles = filter(cfg.Bundles, func(bundle declcfg.Bundle) bool {
+			s, err := isBundleSelected(bundle, cfg.Channels, packages)
+			if err != nil {
+				return false
+			}
+			return s
+		})
+		filteredDC.Channels = filter(cfg.Channels, func(channel declcfg.Channel) bool {
+			for _, selectedPkg := range packages {
+				if len(selectedPkg.Channels) > 0 {
+					for _, selectedChannel := range selectedPkg.Channels {
+						if channel.Name == selectedChannel.Name && channel.Package == selectedPkg.Name {
+							return true
+						}
+					}
+				}
+				if selectedPkg.MaxVersion != "" || selectedPkg.MinVersion != "" {
+					// check that at least one entry corresponds to a bundle that is already selected
+					for _, bundle := range filteredDC.Bundles { //assuming bundles filtering already done
+						for _, entry := range channel.Entries {
+							if bundle.Package == selectedPkg.Name && bundle.Name == entry.Name {
+								return true
+							}
+						}
+					}
+				}
+			}
+			return false
+		})
+	}
+	return &filteredDC, nil
+}
 func findFirstAvailableMirror(ctx context.Context, mirrors []sysregistriesv2.Endpoint, imageName string, prefix string, regFuncs RemoteRegFuncs) (string, error) {
 	finalError := fmt.Errorf("could not find a valid mirror for %s", imageName)
 	if !strings.HasSuffix(prefix, "/") {
