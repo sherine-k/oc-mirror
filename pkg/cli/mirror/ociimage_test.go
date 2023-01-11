@@ -1,5 +1,26 @@
 package mirror
 
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	imagecopy "github.com/containers/image/v5/copy"
+	"github.com/containers/image/v5/signature"
+	"github.com/containers/image/v5/types"
+
+	"github.com/opencontainers/go-digest"
+	"github.com/openshift/oc-mirror/pkg/api/v1alpha2"
+	"github.com/openshift/oc-mirror/pkg/image"
+	"github.com/otiai10/copy"
+	"github.com/stretchr/testify/require"
+)
+
 // import (
 // 	"context"
 // 	"crypto/sha256"
@@ -31,15 +52,15 @@ package mirror
 // 	"k8s.io/cli-runtime/pkg/genericclioptions"
 // )
 
-// const (
-// 	testdata         = "testdata/artifacts/rhop-ctlg-oci"
-// 	testdataMashed   = "testdata/artifacts/rhop-ctlg-oci-mashed"
-// 	rottenManifest   = "testdata/artifacts/rhop-rotten-manifest"
-// 	rottenLayer      = "testdata/artifacts/rhop-rotten-layer"
-// 	rottenConfig     = "testdata/artifacts/rhop-rotten-cfg"
-// 	otherLayer       = "testdata/artifacts/rhop-not-catalog"
-// 	registriesConfig = "testdata/configs/registries.conf"
-// )
+const (
+	testdata         = "testdata/artifacts/rhop-ctlg-oci"
+	testdataMashed   = "testdata/artifacts/rhop-ctlg-oci-mashed"
+	rottenManifest   = "testdata/artifacts/rhop-rotten-manifest"
+	rottenLayer      = "testdata/artifacts/rhop-rotten-layer"
+	rottenConfig     = "testdata/artifacts/rhop-rotten-cfg"
+	otherLayer       = "testdata/artifacts/rhop-not-catalog"
+	registriesConfig = "testdata/configs/registries.conf"
+)
 
 // func TestParse(t *testing.T) {
 // 	toTest := "quay.io/skhoury/ocmir/albo/aws-load-balancer-controller-rhel8@sha256:d7bc364512178c36671d8a4b5a76cf7cb10f8e56997106187b0fe1f032670ece"
@@ -55,150 +76,150 @@ package mirror
 // 	fmt.Printf("%s - %s\n", s, rf)
 // }
 
-// // TODO: add preparation step that saves a catalog locally before testing
-// // see maybe contents of pkg/image/testdata
-// func TestGetOCIImgSrcFromPath(t *testing.T) {
-// 	type spec struct {
-// 		desc  string
-// 		inRef string
-// 		err   string
-// 	}
-// 	wdir, err := os.Getwd()
-// 	if err != nil {
-// 		t.Fatal("unable to get working dir")
-// 	}
-// 	cases := []spec{
-// 		{
-// 			desc:  "full path passes",
-// 			inRef: filepath.Join(wdir, testdata),
-// 			err:   "",
-// 		},
-// 		{
-// 			desc:  "relative path passes",
-// 			inRef: testdata,
-// 			err:   "",
-// 		},
-// 		{
-// 			desc:  "inexisting path should fail",
-// 			inRef: "/inexisting",
-// 			err:   "unable to get OCI Image from oci:/inexisting: open /inexisting/index.json: no such file or directory",
-// 		},
-// 		{
-// 			desc:  "path not containing oci structure should fail",
-// 			inRef: "/tmp",
-// 			err:   "unable to get OCI Image from oci:/tmp: open /tmp/index.json: no such file or directory",
-// 		},
-// 	}
-// 	for _, c := range cases {
-// 		t.Run(c.desc, func(t *testing.T) {
-// 			imgSrc, err := getOCIImgSrcFromPath(context.TODO(), c.inRef)
-// 			if c.err != "" {
-// 				require.EqualError(t, err, c.err)
-// 			} else {
-// 				require.NoError(t, err)
-// 				require.Equal(t, "oci", imgSrc.Reference().Transport().Name())
-// 				imgSrc.Close()
-// 			}
+// TODO: add preparation step that saves a catalog locally before testing
+// see maybe contents of pkg/image/testdata
+func TestGetOCIImgSrcFromPath(t *testing.T) {
+	type spec struct {
+		desc  string
+		inRef string
+		err   string
+	}
+	wdir, err := os.Getwd()
+	if err != nil {
+		t.Fatal("unable to get working dir")
+	}
+	cases := []spec{
+		{
+			desc:  "full path passes",
+			inRef: filepath.Join(wdir, testdata),
+			err:   "",
+		},
+		{
+			desc:  "relative path passes",
+			inRef: testdata,
+			err:   "",
+		},
+		{
+			desc:  "inexisting path should fail",
+			inRef: "/inexisting",
+			err:   "unable to get OCI Image from oci:/inexisting: open /inexisting/index.json: no such file or directory",
+		},
+		{
+			desc:  "path not containing oci structure should fail",
+			inRef: "/tmp",
+			err:   "unable to get OCI Image from oci:/tmp: open /tmp/index.json: no such file or directory",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.desc, func(t *testing.T) {
+			imgSrc, err := getOCIImgSrcFromPath(context.TODO(), c.inRef)
+			if c.err != "" {
+				require.EqualError(t, err, c.err)
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, "oci", imgSrc.Reference().Transport().Name())
+				imgSrc.Close()
+			}
 
-// 		})
-// 	}
-// }
+		})
+	}
+}
 
-// func TestGetManifest(t *testing.T) {
-// 	type spec struct {
-// 		desc       string
-// 		inRef      string
-// 		layerCount int
-// 		err        string
-// 	}
-// 	wdir, err := os.Getwd()
-// 	if err != nil {
-// 		t.Fatal("unable to get working dir")
-// 	}
-// 	cases := []spec{
-// 		{
-// 			desc:       "nominal case",
-// 			inRef:      filepath.Join(wdir, testdata),
-// 			layerCount: 1,
-// 			err:        "",
-// 		},
-// 		{
-// 			desc:       "index is unmarshallable fails",
-// 			inRef:      filepath.Join(wdir, rottenManifest),
-// 			layerCount: 0,
-// 			err:        "unable to unmarshall manifest of image : unexpected end of JSON input",
-// 		},
-// 	}
-// 	for _, c := range cases {
-// 		t.Run(c.desc, func(t *testing.T) {
-// 			imgSrc, err := getOCIImgSrcFromPath(context.TODO(), c.inRef)
-// 			if err != nil {
-// 				t.Fatalf("The given path is not an OCI image : %v", err)
-// 			}
-// 			defer imgSrc.Close()
-// 			manifest, err := getManifest(context.TODO(), imgSrc)
-// 			if c.err != "" {
-// 				require.EqualError(t, err, c.err)
-// 			} else {
-// 				require.NoError(t, err)
-// 				require.Equal(t, c.layerCount, len(manifest.LayerInfos()))
-// 			}
+func TestGetManifest(t *testing.T) {
+	type spec struct {
+		desc       string
+		inRef      string
+		layerCount int
+		err        string
+	}
+	wdir, err := os.Getwd()
+	if err != nil {
+		t.Fatal("unable to get working dir")
+	}
+	cases := []spec{
+		{
+			desc:       "nominal case",
+			inRef:      filepath.Join(wdir, testdata),
+			layerCount: 1,
+			err:        "",
+		},
+		{
+			desc:       "index is unmarshallable fails",
+			inRef:      filepath.Join(wdir, rottenManifest),
+			layerCount: 0,
+			err:        "unable to unmarshall manifest of image : unexpected end of JSON input",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.desc, func(t *testing.T) {
+			imgSrc, err := getOCIImgSrcFromPath(context.TODO(), c.inRef)
+			if err != nil {
+				t.Fatalf("The given path is not an OCI image : %v", err)
+			}
+			defer imgSrc.Close()
+			manifest, err := getManifest(context.TODO(), imgSrc)
+			if c.err != "" {
+				require.EqualError(t, err, c.err)
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, c.layerCount, len(manifest.LayerInfos()))
+			}
 
-// 		})
-// 	}
-// }
+		})
+	}
+}
 
-// func TestGetConfigPathFromLabel(t *testing.T) {
-// 	type spec struct {
-// 		desc            string
-// 		imagePath       string
-// 		configSha       string
-// 		expectedDirName string
-// 		err             string
-// 	}
-// 	cases := []spec{
-// 		{
-// 			desc:            "nominal case",
-// 			imagePath:       testdata,
-// 			configSha:       "sha256:c7c89df4a1f53d7e619080245c4784b6f5e6232fb71e98d981b89799ae578262",
-// 			expectedDirName: "/configs",
-// 			err:             "",
-// 		},
-// 		{
-// 			desc:            "sha doesnt exist fails",
-// 			imagePath:       testdata,
-// 			configSha:       "sha256:inexistingSha",
-// 			expectedDirName: "",
-// 			err:             "unable to read the config blob inexistingSha from the oci image: open testdata/artifacts/rhop-ctlg-oci/blobs/sha256/inexistingSha: no such file or directory",
-// 		},
-// 		{
-// 			desc:            "cfg layer json incorrect fails",
-// 			imagePath:       rottenConfig,
-// 			configSha:       "sha256:c7c89df4a1f53d7e619080245c4784b6f5e6232fb71e98d981b89799ae578262",
-// 			expectedDirName: "",
-// 			err:             "problem unmarshaling config blob in c7c89df4a1f53d7e619080245c4784b6f5e6232fb71e98d981b89799ae578262: unexpected end of JSON input",
-// 		},
-// 		{
-// 			desc:            "label doesnt exist fails",
-// 			imagePath:       rottenConfig,
-// 			configSha:       "sha256:c7c89df4a1f53d7e619080245c4784b6f5e6232fb71e98d981b89799ae5782ff",
-// 			expectedDirName: "",
-// 			err:             "label " + configsLabel + " not found in config blob c7c89df4a1f53d7e619080245c4784b6f5e6232fb71e98d981b89799ae5782ff",
-// 		},
-// 	}
-// 	for _, c := range cases {
-// 		t.Run(c.desc, func(t *testing.T) {
-// 			cfgDir, err := getConfigPathFromConfigLayer(c.imagePath, c.configSha)
-// 			if c.err != "" {
-// 				require.EqualError(t, err, c.err)
-// 			} else {
-// 				require.NoError(t, err)
-// 				require.Equal(t, c.expectedDirName, cfgDir)
-// 			}
+func TestGetConfigPathFromLabel(t *testing.T) {
+	type spec struct {
+		desc            string
+		imagePath       string
+		configSha       string
+		expectedDirName string
+		err             string
+	}
+	cases := []spec{
+		{
+			desc:            "nominal case",
+			imagePath:       testdata,
+			configSha:       "sha256:c7c89df4a1f53d7e619080245c4784b6f5e6232fb71e98d981b89799ae578262",
+			expectedDirName: "/configs",
+			err:             "",
+		},
+		{
+			desc:            "sha doesnt exist fails",
+			imagePath:       testdata,
+			configSha:       "sha256:inexistingSha",
+			expectedDirName: "",
+			err:             "unable to read the config blob inexistingSha from the oci image: open testdata/artifacts/rhop-ctlg-oci/blobs/sha256/inexistingSha: no such file or directory",
+		},
+		{
+			desc:            "cfg layer json incorrect fails",
+			imagePath:       rottenConfig,
+			configSha:       "sha256:c7c89df4a1f53d7e619080245c4784b6f5e6232fb71e98d981b89799ae578262",
+			expectedDirName: "",
+			err:             "problem unmarshaling config blob in c7c89df4a1f53d7e619080245c4784b6f5e6232fb71e98d981b89799ae578262: unexpected end of JSON input",
+		},
+		{
+			desc:            "label doesnt exist fails",
+			imagePath:       rottenConfig,
+			configSha:       "sha256:c7c89df4a1f53d7e619080245c4784b6f5e6232fb71e98d981b89799ae5782ff",
+			expectedDirName: "",
+			err:             "label " + configsLabel + " not found in config blob c7c89df4a1f53d7e619080245c4784b6f5e6232fb71e98d981b89799ae5782ff",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.desc, func(t *testing.T) {
+			cfgDir, err := getConfigPathFromConfigLayer(c.imagePath, c.configSha)
+			if c.err != "" {
+				require.EqualError(t, err, c.err)
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, c.expectedDirName, cfgDir)
+			}
 
-// 		})
-// 	}
-// }
+		})
+	}
+}
 
 // func TestFindFBCConfig(t *testing.T) {
 // 	type spec struct {
@@ -1891,42 +1912,42 @@ package mirror
 // 	}
 // }
 
-// // ////////////////////   Fakes &  mocks ///////////////////////
-// const (
-// 	imgSrcErr   int = 1
-// 	getMnfstErr int = 2
-// )
+// ////////////////////   Fakes &  mocks ///////////////////////
+const (
+	imgSrcErr   int = 1
+	getMnfstErr int = 2
+)
 
-// func createMockFunctions(errorType int) RemoteRegFuncs {
-// 	theMock := RemoteRegFuncs{}
-// 	imgSrcFnc := func(ctx context.Context, sys *types.SystemContext, imgRef types.ImageReference) (types.ImageSource, error) {
-// 		return MockImageSource{}, nil
-// 	}
-// 	getManifestFnc := func(ctx context.Context, instanceDigest *digest.Digest, imgSrc types.ImageSource) ([]byte, string, error) {
-// 		return []byte("fake content"), "v2s1.manifest.json", nil
-// 	}
-// 	if errorType == imgSrcErr {
-// 		imgSrcFnc = func(ctx context.Context, sys *types.SystemContext, imgRef types.ImageReference) (types.ImageSource, error) {
-// 			return nil, errors.New("pinging container registry my.mirror.io: Get \"https://my.mirror.io/v2/\": dial tcp: lookup my.mirror.io: no such host")
-// 		}
-// 	}
-// 	if errorType == getMnfstErr {
-// 		getManifestFnc = func(ctx context.Context, instanceDigest *digest.Digest, imgSrc types.ImageSource) ([]byte, string, error) {
-// 			return nil, "", errors.New("error getting manifest")
-// 		}
-// 	}
-// 	theMock.copy = func(ctx context.Context, policyContext *signature.PolicyContext, destRef types.ImageReference, srcRef types.ImageReference, options *imagecopy.Options) (copiedManifest []byte, retErr error) {
-// 		// case of pulling, or saving from remote to local, fake pull
-// 		if destRef.Transport().Name() != "docker" {
-// 			return nil, copy.Copy(testdata, strings.TrimSuffix(destRef.StringWithinTransport(), ":"))
-// 		}
-// 		return nil, nil
-// 	}
+func createMockFunctions(errorType int) RemoteRegFuncs {
+	theMock := RemoteRegFuncs{}
+	imgSrcFnc := func(ctx context.Context, sys *types.SystemContext, imgRef types.ImageReference) (types.ImageSource, error) {
+		return MockImageSource{}, nil
+	}
+	getManifestFnc := func(ctx context.Context, instanceDigest *digest.Digest, imgSrc types.ImageSource) ([]byte, string, error) {
+		return []byte("fake content"), "v2s1.manifest.json", nil
+	}
+	if errorType == imgSrcErr {
+		imgSrcFnc = func(ctx context.Context, sys *types.SystemContext, imgRef types.ImageReference) (types.ImageSource, error) {
+			return nil, errors.New("pinging container registry my.mirror.io: Get \"https://my.mirror.io/v2/\": dial tcp: lookup my.mirror.io: no such host")
+		}
+	}
+	if errorType == getMnfstErr {
+		getManifestFnc = func(ctx context.Context, instanceDigest *digest.Digest, imgSrc types.ImageSource) ([]byte, string, error) {
+			return nil, "", errors.New("error getting manifest")
+		}
+	}
+	theMock.copy = func(ctx context.Context, policyContext *signature.PolicyContext, destRef types.ImageReference, srcRef types.ImageReference, options *imagecopy.Options) (copiedManifest []byte, retErr error) {
+		// case of pulling, or saving from remote to local, fake pull
+		if destRef.Transport().Name() != "docker" {
+			return nil, copy.Copy(testdata, strings.TrimSuffix(destRef.StringWithinTransport(), ":"))
+		}
+		return nil, nil
+	}
 
-// 	theMock.mirrorMappings = func(cfg v1alpha2.ImageSetConfiguration, images image.TypedImageMapping, insecure bool) error {
-// 		return nil
-// 	}
-// 	theMock.newImageSource = imgSrcFnc
+	theMock.mirrorMappings = func(cfg v1alpha2.ImageSetConfiguration, images image.TypedImageMapping, insecure bool) error {
+		return nil
+	}
+	theMock.newImageSource = imgSrcFnc
 
 // 	theMock.processMirroredImages = func(ctx context.Context, assocs image.AssociationSet, filesInArchive map[string]string, currentMeta v1alpha2.Metadata) (image.TypedImageMapping, error) {
 // 		return image.TypedImageMapping{}, nil
@@ -1938,50 +1959,50 @@ package mirror
 // 		return nil, md, v1alpha2.NewMetadata(), nil
 // 	}
 
-// 	theMock.getManifest = getManifestFnc
-// 	return theMock
-// }
+	theMock.getManifest = getManifestFnc
+	return theMock
+}
 
-// // MockImageSource is used when we don't expect the ImageSource to be used in our tests.
-// type MockImageSource struct {
-// 	errorType int
-// }
+// MockImageSource is used when we don't expect the ImageSource to be used in our tests.
+type MockImageSource struct {
+	errorType int
+}
 
-// // Reference is a mock that panics.
-// func (f MockImageSource) Reference() types.ImageReference {
-// 	panic("Unexpected call to a mock function")
-// }
+// Reference is a mock that panics.
+func (f MockImageSource) Reference() types.ImageReference {
+	panic("Unexpected call to a mock function")
+}
 
-// // Close is a mock that panics.
-// func (f MockImageSource) Close() error {
-// 	fmt.Println("Do nothing")
-// 	return nil
-// }
+// Close is a mock that panics.
+func (f MockImageSource) Close() error {
+	fmt.Println("Do nothing")
+	return nil
+}
 
-// // GetManifest is a mock that panics.
-// func (f MockImageSource) GetManifest(context.Context, *digest.Digest) ([]byte, string, error) {
-// 	if f.errorType > 0 {
-// 		return nil, "", errors.New("error getting manifest")
-// 	}
-// 	return []byte("fake content"), "v2s1.manifest.json", nil
-// }
+// GetManifest is a mock that panics.
+func (f MockImageSource) GetManifest(context.Context, *digest.Digest) ([]byte, string, error) {
+	if f.errorType > 0 {
+		return nil, "", errors.New("error getting manifest")
+	}
+	return []byte("fake content"), "v2s1.manifest.json", nil
+}
 
-// // GetBlob is a mock that panics.
-// func (f MockImageSource) GetBlob(context.Context, types.BlobInfo, types.BlobInfoCache) (io.ReadCloser, int64, error) {
-// 	panic("Unexpected call to a mock function")
-// }
+// GetBlob is a mock that panics.
+func (f MockImageSource) GetBlob(context.Context, types.BlobInfo, types.BlobInfoCache) (io.ReadCloser, int64, error) {
+	panic("Unexpected call to a mock function")
+}
 
-// // HasThreadSafeGetBlob is a mock that panics.
-// func (f MockImageSource) HasThreadSafeGetBlob() bool {
-// 	panic("Unexpected call to a mock function")
-// }
+// HasThreadSafeGetBlob is a mock that panics.
+func (f MockImageSource) HasThreadSafeGetBlob() bool {
+	panic("Unexpected call to a mock function")
+}
 
-// // GetSignatures is a mock that panics.
-// func (f MockImageSource) GetSignatures(context.Context, *digest.Digest) ([][]byte, error) {
-// 	panic("Unexpected call to a mock function")
-// }
+// GetSignatures is a mock that panics.
+func (f MockImageSource) GetSignatures(context.Context, *digest.Digest) ([][]byte, error) {
+	panic("Unexpected call to a mock function")
+}
 
-// // LayerInfosForCopy is a mock that panics.
-// func (f MockImageSource) LayerInfosForCopy(context.Context, *digest.Digest) ([]types.BlobInfo, error) {
-// 	panic("Unexpected call to a mock function")
-// }
+// LayerInfosForCopy is a mock that panics.
+func (f MockImageSource) LayerInfosForCopy(context.Context, *digest.Digest) ([]types.BlobInfo, error) {
+	panic("Unexpected call to a mock function")
+}

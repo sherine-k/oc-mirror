@@ -172,11 +172,18 @@ func (o *OperatorOptions) renderDCFull(ctx context.Context, reg *containerdregis
 	full := !ctlg.IsHeadsOnly() && !hasInclude
 
 	catLogger := o.Logger.WithField("catalog", ctlg.Catalog)
+	ctlgRef := ctlg.Catalog //applies for all docker-v2 remote catalogs
+	if strings.HasPrefix(ctlg.Catalog, ociProtocol) {
+		ctlgRef, err = o.GetCatalogConfigPath(ctx, ctlg.Catalog)
+		if err != nil {
+			return nil, ic, fmt.Errorf("error locating Configs dir in the OCI image: %v", err)
+		}
+	}
 	if full {
 		// Mirror the entire catalog.
 		dc, err = action.Render{
 			Registry: reg,
-			Refs:     []string{ctlg.Catalog},
+			Refs:     []string{ctlgRef},
 		}.Run(ctx)
 		if err != nil {
 			return dc, ic, err
@@ -189,7 +196,7 @@ func (o *OperatorOptions) renderDCFull(ctx context.Context, reg *containerdregis
 		}
 		dc, err = diff.Diff{
 			Registry:         reg,
-			NewRefs:          []string{ctlg.Catalog},
+			NewRefs:          []string{ctlgRef},
 			Logger:           catLogger,
 			IncludeConfig:    dic,
 			SkipDependencies: ctlg.SkipDependencies,

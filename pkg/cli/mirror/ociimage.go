@@ -1,5 +1,24 @@
 package mirror
 
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io/ioutil"
+	"path/filepath"
+	"strings"
+
+	imagecopy "github.com/containers/image/v5/copy"
+
+	"github.com/containers/image/v5/manifest"
+	"github.com/containers/image/v5/signature"
+	"github.com/containers/image/v5/transports/alltransports"
+	"github.com/containers/image/v5/types"
+	"github.com/opencontainers/go-digest"
+	"github.com/openshift/oc-mirror/pkg/api/v1alpha2"
+	"github.com/openshift/oc-mirror/pkg/image"
+)
+
 // import (
 // 	"archive/tar"
 // 	"compress/gzip"
@@ -34,14 +53,14 @@ package mirror
 // 	"sigs.k8s.io/yaml"
 // )
 
-// const (
-// 	blobsPath           string = "/blobs/sha256/"
-// 	ociProtocol         string = "oci:"
+const (
+	blobsPath   string = "/blobs/sha256/"
+	ociProtocol string = "oci:"
 // 	dockerProtocol      string = "docker://"
 // 	configPath          string = "configs/"
 // 	catalogJSON         string = "/catalog.json"
 // 	relatedImages       string = "relatedImages"
-// 	configsLabel        string = "operators.operatorframework.io.index.configs.v1"
+	configsLabel        string = "operators.operatorframework.io.index.configs.v1"
 // 	artifactsFolderName string = "olm_artifacts"
 // 	ocpRelease          string = "release"
 // 	ocpReleaseImages    string = "release-images"
@@ -51,19 +70,19 @@ package mirror
 // 	manifests           string = "manifests"
 // 	openshift           string = "openshift"
 // 	source              string = "src/v2"
-// )
+)
 
 // // RemoteRegFuncs contains the functions to be used for working with remote registries
 // // In order to be able to mock these external packages,
 // // we pass them as parameters of bulkImageCopy and bulkImageMirror
-// type RemoteRegFuncs struct {
-// 	copy                  func(ctx context.Context, policyContext *signature.PolicyContext, destRef types.ImageReference, srcRef types.ImageReference, options *imagecopy.Options) (copiedManifest []byte, retErr error)
-// 	mirrorMappings        func(cfg v1alpha2.ImageSetConfiguration, images image.TypedImageMapping, insecure bool) error
-// 	newImageSource        func(ctx context.Context, sys *types.SystemContext, imgRef types.ImageReference) (types.ImageSource, error)
-// 	getManifest           func(ctx context.Context, instanceDigest *digest.Digest, imgSrc types.ImageSource) ([]byte, string, error)
+type RemoteRegFuncs struct {
+	copy                  func(ctx context.Context, policyContext *signature.PolicyContext, destRef types.ImageReference, srcRef types.ImageReference, options *imagecopy.Options) (copiedManifest []byte, retErr error)
+	mirrorMappings        func(cfg v1alpha2.ImageSetConfiguration, images image.TypedImageMapping, insecure bool) error
+	newImageSource        func(ctx context.Context, sys *types.SystemContext, imgRef types.ImageReference) (types.ImageSource, error)
+	getManifest           func(ctx context.Context, instanceDigest *digest.Digest, imgSrc types.ImageSource) ([]byte, string, error)
 // 	handleMetadata        func(ctx context.Context, tmpdir string, filesInArchive map[string]string) (backend storage.Backend, incoming, curr v1alpha2.Metadata, err error)
 // 	processMirroredImages func(ctx context.Context, assocs image.AssociationSet, filesInArchive map[string]string, currentMeta v1alpha2.Metadata) (image.TypedImageMapping, error)
-// }
+}
 
 // // getISConfig simple function to read and unmarshal the imagesetconfig
 // // set via the command line
@@ -525,47 +544,47 @@ package mirror
 // 	return cfgContentsPath, nil
 // }
 
-// // getCatalogConfigPath takes an OCI FBC image as an input,
-// // it reads the manifest, then the config layer,
-// // more specifically the label `configLabel`
-// // and returns the value of that label
-// // The function fails if more than one manifest exist in the image
-// func (o *MirrorOptions) getCatalogConfigPath(ctx context.Context, imagePath string) (string, error) {
-// 	// read the index.json of the catalog
-// 	srcImg, err := getOCIImgSrcFromPath(ctx, imagePath)
-// 	if err != nil {
-// 		return "", err
-// 	}
-// 	manifest, err := getManifest(ctx, srcImg)
-// 	if err != nil {
-// 		return "", err
-// 	}
+// getCatalogConfigPath takes an OCI FBC image as an input,
+// it reads the manifest, then the config layer,
+// more specifically the label `configLabel`
+// and returns the value of that label
+// The function fails if more than one manifest exist in the image
+func (o *MirrorOptions) GetCatalogConfigPath(ctx context.Context, imagePath string) (string, error) {
+	// read the index.json of the catalog
+	srcImg, err := getOCIImgSrcFromPath(ctx, imagePath)
+	if err != nil {
+		return "", err
+	}
+	manifest, err := getManifest(ctx, srcImg)
+	if err != nil {
+		return "", err
+	}
 
-// 	//Use the label in the config layer to determine the
-// 	//folder containing the related images, when untarring layers
-// 	cfgDirName, err := getConfigPathFromConfigLayer(imagePath, string(manifest.ConfigInfo().Digest))
-// 	if err != nil {
-// 		return "", err
-// 	}
-// 	return cfgDirName, nil
-// }
+	//Use the label in the config layer to determine the
+	//folder containing the related images, when untarring layers
+	cfgDirName, err := getConfigPathFromConfigLayer(imagePath, string(manifest.ConfigInfo().Digest))
+	if err != nil {
+		return "", err
+	}
+	return cfgDirName, nil
+}
 
-// func getConfigPathFromConfigLayer(imagePath, configSha string) (string, error) {
-// 	var cfg *manifest.Schema2V1Image
-// 	configLayerDir := configSha[7:]
-// 	cfgBlob, err := ioutil.ReadFile(filepath.Join(imagePath, blobsPath, configLayerDir))
-// 	if err != nil {
-// 		return "", fmt.Errorf("unable to read the config blob %s from the oci image: %w", configLayerDir, err)
-// 	}
-// 	err = json.Unmarshal(cfgBlob, &cfg)
-// 	if err != nil {
-// 		return "", fmt.Errorf("problem unmarshaling config blob in %s: %w", configLayerDir, err)
-// 	}
-// 	if dirName, ok := cfg.Config.Labels[configsLabel]; ok {
-// 		return dirName, nil
-// 	}
-// 	return "", fmt.Errorf("label %s not found in config blob %s", configsLabel, configLayerDir)
-// }
+func getConfigPathFromConfigLayer(imagePath, configSha string) (string, error) {
+	var cfg *manifest.Schema2V1Image
+	configLayerDir := configSha[7:]
+	cfgBlob, err := ioutil.ReadFile(filepath.Join(imagePath, blobsPath, configLayerDir))
+	if err != nil {
+		return "", fmt.Errorf("unable to read the config blob %s from the oci image: %w", configLayerDir, err)
+	}
+	err = json.Unmarshal(cfgBlob, &cfg)
+	if err != nil {
+		return "", fmt.Errorf("problem unmarshaling config blob in %s: %w", configLayerDir, err)
+	}
+	if dirName, ok := cfg.Config.Labels[configsLabel]; ok {
+		return dirName, nil
+	}
+	return "", fmt.Errorf("label %s not found in config blob %s", configsLabel, configLayerDir)
+}
 
 // // getRelatedImages reads a directory containing an FBC catalog () unpacked contents
 // // and returns the list of relatedImages found in the CSVs of bundles
@@ -711,37 +730,37 @@ package mirror
 // 	return "", finalError
 // }
 
-// // getManifest reads the manifest of the OCI FBC image
-// // and returns it as a go structure of type manifest.Manifest
-// func getManifest(ctx context.Context, imgSrc types.ImageSource) (manifest.Manifest, error) {
-// 	manifestBlob, manifestType, err := imgSrc.GetManifest(ctx, nil)
-// 	if err != nil {
-// 		return nil, fmt.Errorf("unable to get manifest blob from image : %w", err)
-// 	}
-// 	manifest, err := manifest.FromBlob(manifestBlob, manifestType)
-// 	if err != nil {
-// 		return nil, fmt.Errorf("unable to unmarshall manifest of image : %w", err)
-// 	}
-// 	return manifest, nil
-// }
+// getManifest reads the manifest of the OCI FBC image
+// and returns it as a go structure of type manifest.Manifest
+func getManifest(ctx context.Context, imgSrc types.ImageSource) (manifest.Manifest, error) {
+	manifestBlob, manifestType, err := imgSrc.GetManifest(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("unable to get manifest blob from image : %w", err)
+	}
+	manifest, err := manifest.FromBlob(manifestBlob, manifestType)
+	if err != nil {
+		return nil, fmt.Errorf("unable to unmarshall manifest of image : %w", err)
+	}
+	return manifest, nil
+}
 
-// // getOCIImgSrcFromPath tries to "load" the OCI FBC image in the path
-// // for further processing.
-// // It supports path strings with or without the protocol (oci:) prefix
-// func getOCIImgSrcFromPath(ctx context.Context, path string) (types.ImageSource, error) {
-// 	if !strings.HasPrefix(path, "oci") {
-// 		path = ociProtocol + path
-// 	}
-// 	ociImgRef, err := alltransports.ParseImageName(path)
-// 	if err != nil {
-// 		return nil, err
-// 	}
-// 	imgsrc, err := ociImgRef.NewImageSource(ctx, nil)
-// 	if err != nil {
-// 		return nil, fmt.Errorf("unable to get OCI Image from %s: %w", path, err)
-// 	}
-// 	return imgsrc, nil
-// }
+// getOCIImgSrcFromPath tries to "load" the OCI FBC image in the path
+// for further processing.
+// It supports path strings with or without the protocol (oci:) prefix
+func getOCIImgSrcFromPath(ctx context.Context, path string) (types.ImageSource, error) {
+	if !strings.HasPrefix(path, "oci") {
+		path = ociProtocol + path
+	}
+	ociImgRef, err := alltransports.ParseImageName(path)
+	if err != nil {
+		return nil, err
+	}
+	imgsrc, err := ociImgRef.NewImageSource(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("unable to get OCI Image from %s: %w", path, err)
+	}
+	return imgsrc, nil
+}
 
 // // UntarLayers simple function that untars the layer that
 // // has the FB configuration
