@@ -17,6 +17,7 @@ import (
 	"github.com/opencontainers/go-digest"
 	"github.com/openshift/oc-mirror/pkg/api/v1alpha2"
 	"github.com/openshift/oc-mirror/pkg/image"
+	"github.com/openshift/oc-mirror/pkg/metadata/storage"
 	"github.com/otiai10/copy"
 	"github.com/stretchr/testify/require"
 )
@@ -1949,15 +1950,15 @@ func createMockFunctions(errorType int) RemoteRegFuncs {
 	}
 	theMock.newImageSource = imgSrcFnc
 
-// 	theMock.processMirroredImages = func(ctx context.Context, assocs image.AssociationSet, filesInArchive map[string]string, currentMeta v1alpha2.Metadata) (image.TypedImageMapping, error) {
-// 		return image.TypedImageMapping{}, nil
-// 	}
+	theMock.processMirroredImages = func(ctx context.Context, assocs image.AssociationSet, filesInArchive map[string]string, currentMeta v1alpha2.Metadata) (image.TypedImageMapping, error) {
+		return image.TypedImageMapping{}, nil
+	}
 
-// 	theMock.handleMetadata = func(ctx context.Context, tmpdir string, filesInArchive map[string]string) (backend storage.Backend, incoming, curr v1alpha2.Metadata, err error) {
-// 		md := v1alpha2.NewMetadata()
-// 		md.SingleUse = true
-// 		return nil, md, v1alpha2.NewMetadata(), nil
-// 	}
+	theMock.handleMetadata = func(ctx context.Context, tmpdir string, filesInArchive map[string]string) (backend storage.Backend, incoming, curr v1alpha2.Metadata, err error) {
+		md := v1alpha2.NewMetadata()
+		md.SingleUse = true
+		return nil, md, v1alpha2.NewMetadata(), nil
+	}
 
 	theMock.getManifest = getManifestFnc
 	return theMock

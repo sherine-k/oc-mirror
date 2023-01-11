@@ -17,6 +17,7 @@ import (
 	"github.com/opencontainers/go-digest"
 	"github.com/openshift/oc-mirror/pkg/api/v1alpha2"
 	"github.com/openshift/oc-mirror/pkg/image"
+	"github.com/openshift/oc-mirror/pkg/metadata/storage"
 )
 
 // import (
@@ -56,20 +57,21 @@ import (
 const (
 	blobsPath   string = "/blobs/sha256/"
 	ociProtocol string = "oci:"
-// 	dockerProtocol      string = "docker://"
-// 	configPath          string = "configs/"
-// 	catalogJSON         string = "/catalog.json"
-// 	relatedImages       string = "relatedImages"
-	configsLabel        string = "operators.operatorframework.io.index.configs.v1"
-// 	artifactsFolderName string = "olm_artifacts"
-// 	ocpRelease          string = "release"
-// 	ocpReleaseImages    string = "release-images"
-// 	dockerPrefix        string = "docker://"
-// 	filePrefix          string = "file://"
-// 	sha256Tag           string = "sha256"
-// 	manifests           string = "manifests"
-// 	openshift           string = "openshift"
-// 	source              string = "src/v2"
+	// 	dockerProtocol      string = "docker://"
+	// 	configPath          string = "configs/"
+	// 	catalogJSON         string = "/catalog.json"
+	// 	relatedImages       string = "relatedImages"
+	configsLabel string = "operators.operatorframework.io.index.configs.v1"
+
+// artifactsFolderName string = "olm_artifacts"
+// ocpRelease          string = "release"
+// ocpReleaseImages    string = "release-images"
+// dockerPrefix        string = "docker://"
+// filePrefix          string = "file://"
+// sha256Tag           string = "sha256"
+// manifests           string = "manifests"
+// openshift           string = "openshift"
+// source              string = "src/v2"
 )
 
 // // RemoteRegFuncs contains the functions to be used for working with remote registries
@@ -80,8 +82,8 @@ type RemoteRegFuncs struct {
 	mirrorMappings        func(cfg v1alpha2.ImageSetConfiguration, images image.TypedImageMapping, insecure bool) error
 	newImageSource        func(ctx context.Context, sys *types.SystemContext, imgRef types.ImageReference) (types.ImageSource, error)
 	getManifest           func(ctx context.Context, instanceDigest *digest.Digest, imgSrc types.ImageSource) ([]byte, string, error)
-// 	handleMetadata        func(ctx context.Context, tmpdir string, filesInArchive map[string]string) (backend storage.Backend, incoming, curr v1alpha2.Metadata, err error)
-// 	processMirroredImages func(ctx context.Context, assocs image.AssociationSet, filesInArchive map[string]string, currentMeta v1alpha2.Metadata) (image.TypedImageMapping, error)
+	handleMetadata        func(ctx context.Context, tmpdir string, filesInArchive map[string]string) (backend storage.Backend, incoming, curr v1alpha2.Metadata, err error)
+	processMirroredImages func(ctx context.Context, assocs image.AssociationSet, filesInArchive map[string]string, currentMeta v1alpha2.Metadata) (image.TypedImageMapping, error)
 }
 
 // // getISConfig simple function to read and unmarshal the imagesetconfig

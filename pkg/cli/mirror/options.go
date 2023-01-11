@@ -41,7 +41,7 @@ type MirrorOptions struct {
 	cancelCh         <-chan struct{}
 	once             sync.Once
 	continuedOnError bool
-	// remoteRegFuncs   RemoteRegFuncs
+	remoteRegFuncs   RemoteRegFuncs
 }
 
 func (o *MirrorOptions) BindFlags(fs *pflag.FlagSet) {

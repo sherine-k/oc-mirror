@@ -247,9 +247,17 @@ func (o *OperatorOptions) renderDCDiff(ctx context.Context, reg *containerdregis
 	// Generate and mirror a heads-only diff using the catalog as a new ref,
 	// and an old ref found for this catalog in lastRun.
 	catLogger := o.Logger.WithField("catalog", ctlg.Catalog)
+
+	ctlgRef := ctlg.Catalog //applies for all docker-v2 remote catalogs
+	if strings.HasPrefix(ctlg.Catalog, ociProtocol) {
+		ctlgRef, err = o.GetCatalogConfigPath(ctx, ctlg.Catalog)
+		if err != nil {
+			return nil, ic, fmt.Errorf("error locating Configs dir in the OCI image: %v", err)
+		}
+	}
 	a := diff.Diff{
 		Registry:         reg,
-		NewRefs:          []string{ctlg.Catalog},
+		NewRefs:          []string{ctlgRef},
 		Logger:           catLogger,
 		SkipDependencies: ctlg.SkipDependencies,
 	}
@@ -266,7 +274,7 @@ func (o *OperatorOptions) renderDCDiff(ctx context.Context, reg *containerdregis
 		// Mirror the entire catalog.
 		dc, err = action.Render{
 			Registry: reg,
-			Refs:     []string{ctlg.Catalog},
+			Refs:     []string{ctlgRef},
 		}.Run(ctx)
 		if err != nil {
 			return dc, ic, err
@@ -284,7 +292,7 @@ func (o *OperatorOptions) renderDCDiff(ctx context.Context, reg *containerdregis
 				icManager = operator.NewCatalogStrategy()
 				dc, err = action.Render{
 					Registry: reg,
-					Refs:     []string{ctlg.Catalog},
+					Refs:     []string{ctlgRef},
 				}.Run(ctx)
 				if err != nil {
 					return dc, ic, err
