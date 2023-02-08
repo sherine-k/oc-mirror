@@ -38,11 +38,6 @@ import (
 	"github.com/openshift/oc-mirror/pkg/metadata/storage"
 )
 
-const (
-	OCIFeatureCopyAction   = "copy"
-	OCIFeatureMirrorAction = "mirror"
-)
-
 var (
 	mirrorlongDesc = templates.LongDesc(
 		` 
@@ -280,6 +275,9 @@ func (o *MirrorOptions) Validate() error {
 			}
 		}
 	}
+	if !o.UseOCIFeature && len(o.OCIRegistriesConfig) > 0 {
+		return fmt.Errorf("oci-registries-config flag can only be used with the --use-oci-feature flag")
+	}
 
 	return nil
 }
@@ -302,10 +300,6 @@ func (o *MirrorOptions) Run(cmd *cobra.Command, f kcmdutil.Factory) (err error) 
 
 	if o.UseOCIFeature {
 		return o.mirrorOCIImages(cmd.Context(), cleanup)
-	} else {
-		if len(o.OCIRegistriesConfig) > 0 {
-			return fmt.Errorf("this flag can only be used with the --use-oci-feature flag")
-		}
 	}
 	return o.mirrorImages(cmd.Context(), cleanup)
 }
