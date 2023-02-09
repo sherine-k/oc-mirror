@@ -379,7 +379,7 @@ func addCatalogToMapping(catalogMapping image.TypedImageMapping, srcOperator v1a
 		return err
 	}
 	if srcOperator.IsFBCOCI() {
-		srcCtlgRef = ociProtocol + "//" + srcCtlgRef
+		srcCtlgRef = v1alpha2.OCITransportPrefix + "//" + srcCtlgRef
 	}
 
 	ctlgSrcTIR, err := image.ParseReference(srcCtlgRef)
@@ -422,9 +422,6 @@ func addCatalogToMapping(catalogMapping image.TypedImageMapping, srcOperator v1a
 	if image.IsFBCOCI(srcCtlgRef) {
 		ctlgSrcTI.ImageFormat = image.OCIFormat
 		ctlgDstTI.ImageFormat = image.OCIFormat
-	} else {
-		ctlgSrcTI.ImageFormat = image.OtherFormat
-		ctlgDstTI.ImageFormat = image.OtherFormat
 	}
 
 	catalogMapping[ctlgSrcTI] = ctlgDstTI
@@ -685,7 +682,7 @@ func getManifest(ctx context.Context, imgSrc types.ImageSource) (manifest.Manife
 // It supports path strings with or without the protocol (oci:) prefix
 func getOCIImgSrcFromPath(ctx context.Context, path string) (types.ImageSource, error) {
 	if !strings.HasPrefix(path, "oci") {
-		path = ociProtocol + path
+		path = v1alpha2.OCITransportPrefix + path
 	}
 	ociImgRef, err := alltransports.ParseImageName(path)
 	if err != nil {

@@ -210,7 +210,7 @@ func TestFindFBCConfig(t *testing.T) {
 		{
 			desc: "nominal case",
 			options: &MirrorOptions{
-				From:      ociProtocol + testdata,
+				From:      v1alpha2.OCITransportPrefix + testdata,
 				ToMirror:  "test.registry.io",
 				OutputDir: testdata,
 			},
@@ -219,7 +219,7 @@ func TestFindFBCConfig(t *testing.T) {
 		{
 			desc: "not a FBC image fails",
 			options: &MirrorOptions{
-				From:      ociProtocol + testdata,
+				From:      v1alpha2.OCITransportPrefix + testdata,
 				ToMirror:  "test.registry.io",
 				OutputDir: "/tmp",
 			},
@@ -228,7 +228,7 @@ func TestFindFBCConfig(t *testing.T) {
 		{
 			desc: "corrupted manifest fails",
 			options: &MirrorOptions{
-				From:      ociProtocol + testdata,
+				From:      v1alpha2.OCITransportPrefix + testdata,
 				ToMirror:  "test.registry.io",
 				OutputDir: rottenManifest,
 			},
@@ -237,7 +237,7 @@ func TestFindFBCConfig(t *testing.T) {
 		{
 			desc: "corrupted layer fails",
 			options: &MirrorOptions{
-				From:      ociProtocol + testdata,
+				From:      v1alpha2.OCITransportPrefix + testdata,
 				ToMirror:  "test.registry.io",
 				OutputDir: rottenLayer,
 			},
@@ -646,7 +646,7 @@ func TestPullImage(t *testing.T) {
 	cases := []spec{
 		{
 			desc: "nominal oci case passes",
-			to:   ociProtocol + t.TempDir(),
+			to:   v1alpha2.OCITransportPrefix + t.TempDir(),
 			from: "docker://localhost:5000/ocmir/a-fake-image:latest",
 			opts: &MirrorOptions{
 				DestSkipTLS:                false,
@@ -682,7 +682,7 @@ func TestPushImage(t *testing.T) {
 	cases := []spec{
 		{
 			desc: "nominal case passes",
-			from: ociProtocol + testdata,
+			from: v1alpha2.OCITransportPrefix + testdata,
 			to:   "docker://localhost:5000/ocmir",
 			opts: &MirrorOptions{
 				DestSkipTLS:                false,
@@ -1067,8 +1067,7 @@ func TestGenerateSrcToFileMapping(t *testing.T) {
 							ID:        "sha256:7e1e74b87a503e95db5203334917856f61aece90a72e8d53a9fd903344eb78a5",
 						},
 					},
-					Category:    v1alpha2.TypeOperatorRelatedImage,
-					ImageFormat: "",
+					Category: v1alpha2.TypeOperatorRelatedImage,
 				}: image.TypedImage{
 					TypedImageReference: imagesource.TypedImageReference{
 						Type: "file",
@@ -1080,8 +1079,7 @@ func TestGenerateSrcToFileMapping(t *testing.T) {
 							ID:        "", // is this correct??
 						},
 					},
-					Category:    v1alpha2.TypeOperatorRelatedImage,
-					ImageFormat: "",
+					Category: v1alpha2.TypeOperatorRelatedImage,
 				},
 
 				image.TypedImage{
@@ -1095,8 +1093,7 @@ func TestGenerateSrcToFileMapping(t *testing.T) {
 							ID:        "",
 						},
 					},
-					Category:    v1alpha2.TypeOperatorRelatedImage,
-					ImageFormat: "",
+					Category: v1alpha2.TypeOperatorRelatedImage,
 				}: image.TypedImage{
 					TypedImageReference: imagesource.TypedImageReference{
 						Type: "file",
@@ -1108,8 +1105,7 @@ func TestGenerateSrcToFileMapping(t *testing.T) {
 							ID:        "",
 						},
 					},
-					Category:    v1alpha2.TypeOperatorRelatedImage,
-					ImageFormat: "",
+					Category: v1alpha2.TypeOperatorRelatedImage,
 				},
 
 				image.TypedImage{
@@ -1123,8 +1119,7 @@ func TestGenerateSrcToFileMapping(t *testing.T) {
 							ID:        "",
 						},
 					},
-					Category:    v1alpha2.TypeOperatorRelatedImage,
-					ImageFormat: "",
+					Category: v1alpha2.TypeOperatorRelatedImage,
 				}: image.TypedImage{
 					TypedImageReference: imagesource.TypedImageReference{
 						Type: "file",
@@ -1136,8 +1131,7 @@ func TestGenerateSrcToFileMapping(t *testing.T) {
 							ID:        "",
 						},
 					},
-					Category:    v1alpha2.TypeOperatorRelatedImage,
-					ImageFormat: "",
+					Category: v1alpha2.TypeOperatorRelatedImage,
 				},
 			},
 
@@ -1180,8 +1174,7 @@ func TestGenerateSrcToFileMapping(t *testing.T) {
 							ID:        "sha256:7e1e74b87a503e95db5203334917856f61aece90a72e8d53a9fd903344eb78a5",
 						},
 					},
-					Category:    v1alpha2.TypeOperatorRelatedImage,
-					ImageFormat: "",
+					Category: v1alpha2.TypeOperatorRelatedImage,
 				}: image.TypedImage{
 					TypedImageReference: imagesource.TypedImageReference{
 						Type: "file",
@@ -1193,8 +1186,7 @@ func TestGenerateSrcToFileMapping(t *testing.T) {
 							ID:        "",
 						},
 					},
-					Category:    v1alpha2.TypeOperatorRelatedImage,
-					ImageFormat: "",
+					Category: v1alpha2.TypeOperatorRelatedImage,
 				},
 			},
 
@@ -1399,8 +1391,7 @@ func TestAddCatalogToMapping(t *testing.T) {
 							ID:        digest.FromString("just for testing").String(),
 						},
 					},
-					Category:    v1alpha2.TypeOperatorCatalog,
-					ImageFormat: image.OtherFormat,
+					Category: v1alpha2.TypeOperatorCatalog,
 				}: image.TypedImage{
 					TypedImageReference: imagesource.TypedImageReference{
 						Type: "docker",
@@ -1412,8 +1403,7 @@ func TestAddCatalogToMapping(t *testing.T) {
 							ID:        digest.FromString("just for testing").String(),
 						},
 					},
-					Category:    v1alpha2.TypeOperatorCatalog,
-					ImageFormat: image.OtherFormat,
+					Category: v1alpha2.TypeOperatorCatalog,
 				},
 			},
 			expectedErr: "",
@@ -1479,8 +1469,7 @@ func TestAddRelatedImageToMapping(t *testing.T) {
 							Tag:       "",
 							ID:        "sha256:2881fc4ddeea9a1d244c37c0216c7d6c79a572757bce007520523c9120e66429"},
 					},
-					Category:    v1alpha2.TypeOperatorRelatedImage,
-					ImageFormat: "",
+					Category: v1alpha2.TypeOperatorRelatedImage,
 				}: image.TypedImage{
 					TypedImageReference: imagesource.TypedImageReference{
 						Type: "docker",
@@ -1492,8 +1481,7 @@ func TestAddRelatedImageToMapping(t *testing.T) {
 							ID:        "sha256:2881fc4ddeea9a1d244c37c0216c7d6c79a572757bce007520523c9120e66429",
 						},
 					},
-					Category:    v1alpha2.TypeOperatorRelatedImage,
-					ImageFormat: "",
+					Category: v1alpha2.TypeOperatorRelatedImage,
 				},
 			},
 			img: declcfg.RelatedImage{
@@ -1518,8 +1506,7 @@ func TestAddRelatedImageToMapping(t *testing.T) {
 							Tag:       "4.12.0-0.okd-scos-2022-10-22-232744-branding",
 							ID:        ""},
 					},
-					Category:    v1alpha2.TypeOperatorRelatedImage,
-					ImageFormat: "",
+					Category: v1alpha2.TypeOperatorRelatedImage,
 				}: image.TypedImage{
 					TypedImageReference: imagesource.TypedImageReference{
 						Type: "docker",
@@ -1531,8 +1518,7 @@ func TestAddRelatedImageToMapping(t *testing.T) {
 							ID:        "",
 						},
 					},
-					Category:    v1alpha2.TypeOperatorRelatedImage,
-					ImageFormat: "",
+					Category: v1alpha2.TypeOperatorRelatedImage,
 				},
 			},
 			img: declcfg.RelatedImage{
@@ -1557,8 +1543,7 @@ func TestAddRelatedImageToMapping(t *testing.T) {
 							Tag:       "4.12.0-0.okd-scos-2022-10-22-232744-branding",
 							ID:        ""},
 					},
-					Category:    v1alpha2.TypeOperatorRelatedImage,
-					ImageFormat: "",
+					Category: v1alpha2.TypeOperatorRelatedImage,
 				}: image.TypedImage{
 					TypedImageReference: imagesource.TypedImageReference{
 						Type: "docker",
@@ -1570,8 +1555,7 @@ func TestAddRelatedImageToMapping(t *testing.T) {
 							ID:        "",
 						},
 					},
-					Category:    v1alpha2.TypeOperatorRelatedImage,
-					ImageFormat: "",
+					Category: v1alpha2.TypeOperatorRelatedImage,
 				},
 			},
 			img: declcfg.RelatedImage{
