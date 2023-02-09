@@ -105,7 +105,7 @@ func (o *MirrorOptions) bulkImageMirror(ctx context.Context, isc *v1alpha2.Image
 		operatorCatalog := image.TrimProtocol(operator.Catalog)
 
 		// check for the valid config label to use
-		configsLabel, err := o.getCatalogConfigPath(ctx, operatorCatalog)
+		configsLabel, err := o.GetCatalogConfigPath(ctx, operatorCatalog)
 		if err != nil {
 			log.Fatalf("unable to retrieve configs layer for image %s:\n%v\nMake sure this catalog is in OCI format", operator.Catalog, err)
 			return err
@@ -200,7 +200,8 @@ func (o *MirrorOptions) bulkImageMirror(ctx context.Context, isc *v1alpha2.Image
 		return err
 	}
 
-	return o.remoteRegFuncs.m2mWorkflowWrapper(ctx, *isc, cleanup)
+	return nil
+	// return o.remoteRegFuncs.m2mWorkflowWrapper(ctx, *isc, cleanup)
 }
 
 func (o *MirrorOptions) generateSrcToFileMapping(ctx context.Context, relatedImages []declcfg.RelatedImage) (image.TypedImageMapping, error) {
@@ -484,7 +485,7 @@ func (o *MirrorOptions) findFBCConfig(ctx context.Context, imagePath, catalogCon
 // more specifically the label `configLabel`
 // and returns the value of that label
 // The function fails if more than one manifest exist in the image
-func (o *MirrorOptions) getCatalogConfigPath(ctx context.Context, imagePath string) (string, error) {
+func (o *MirrorOptions) GetCatalogConfigPath(ctx context.Context, imagePath string) (string, error) {
 	// read the index.json of the catalog
 	srcImg, err := getOCIImgSrcFromPath(ctx, imagePath)
 	if err != nil {

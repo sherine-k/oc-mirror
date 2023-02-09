@@ -13,12 +13,15 @@ import (
 
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/remotes"
+	"github.com/containers/image/v5/copy"
+	"github.com/containers/image/v5/types"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/empty"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/joelanford/ignore"
+	"github.com/opencontainers/go-digest"
 	imgreference "github.com/openshift/library-go/pkg/image/reference"
 	"github.com/openshift/oc/pkg/cli/admin/catalog"
 	"github.com/openshift/oc/pkg/cli/image/imagesource"
@@ -101,41 +104,58 @@ func (o *OperatorOptions) run(ctx context.Context, cfg v1alpha2.ImageSetConfigur
 	defer reg.Destroy()
 
 	mmapping := image.TypedImageMapping{}
-	for i, ctlg := range cfg.Mirror.Operators {
-		// Exclude catalog images with "oci://" from renderDC and plan
-		// These catalogs will be handled with bulkImageMirror instead
-		// TODO: we should be able to use renderDC still for these images
-		// so that the catalog image (filtered) gets recreated (and written
-		// to disk) for the OCI catalogs as well
-		if image.IsFBCOCI(ctlg.Catalog) {
-			cfg.Mirror.Operators = append(cfg.Mirror.Operators[:i], cfg.Mirror.Operators[i+1:]...)
-		} else {
-			ctlgRef, err := image.ParseReference(ctlg.Catalog)
-			if err != nil {
-				return nil, fmt.Errorf("error parsing catalog: %v", err)
+	for _, ctlg := range cfg.Mirror.Operators {
+		if ctlg.IsFBCOCI() {
+			o.remoteRegFuncs = RemoteRegFuncs{
+				copy:           copy.Image,
+				mirrorMappings: o.mirrorMappings,
+				newImageSource: func(ctx context.Context, sys *types.SystemContext, imgRef types.ImageReference) (types.ImageSource, error) {
+					return imgRef.NewImageSource(ctx, sys)
+				},
+				getManifest: func(ctx context.Context, instanceDigest *digest.Digest, imgSrc types.ImageSource) ([]byte, string, error) {
+					return imgSrc.GetManifest(ctx, instanceDigest)
+				},
+				handleMetadata:     o.handleMetadata,
+				m2mWorkflowWrapper: o.mirrorToMirrorWrapper,
 			}
 
-			targetName, err := ctlg.GetUniqueName()
-			if err != nil {
-				return nil, err
+			cleanup := func() error {
+				if !o.SkipCleanup {
+					return os.RemoveAll(filepath.Join(o.Dir, config.SourceDir))
+				}
+				return nil
 			}
-			targetCtlg, err := imagesource.ParseReference(targetName)
-			if err != nil {
-				return nil, fmt.Errorf("error parsing catalog: %v", err)
-			}
-
-			// Render the catalog to mirror into a declarative config.
-			dc, ic, err := renderDC(ctx, reg, ctlg)
-			if err != nil {
-				return nil, o.checkValidationErr(err)
-			}
-
-			mappings, err := o.plan(ctx, dc, ic, ctlgRef, targetCtlg)
-			if err != nil {
-				return nil, err
-			}
-			mmapping.Merge(mappings)
+			o.bulkImageMirror(ctx, &cfg, o.ToMirror, o.UserNamespace, cleanup)
 		}
+		ctlgRef, err := image.ParseReference(ctlg.Catalog)
+		if err != nil {
+			return nil, fmt.Errorf("error parsing catalog: %v", err)
+		}
+
+		targetName, err := ctlg.GetUniqueName()
+		if err != nil {
+			return nil, err
+		}
+		targetCtlg, err := image.ParseReference(targetName)
+		if err != nil {
+			return nil, fmt.Errorf("error parsing catalog: %v", err)
+		}
+		if ctlg.IsFBCOCI() {
+			targetCtlg.Type = image.DestinationOCI
+			targetCtlg.Ref.ID = "1234" //TODO take the solution from brach ocpbugs-5085-2
+		}
+
+		// Render the catalog to mirror into a declarative config.
+		dc, ic, err := renderDC(ctx, reg, ctlg)
+		if err != nil {
+			return nil, o.checkValidationErr(err)
+		}
+
+		mappings, err := o.plan(ctx, dc, ic, ctlgRef, targetCtlg)
+		if err != nil {
+			return nil, err
+		}
+		mmapping.Merge(mappings)
 	}
 
 	return mmapping, nil
@@ -179,11 +199,31 @@ func (o *OperatorOptions) renderDCFull(ctx context.Context, reg *containerdregis
 	full := !ctlg.IsHeadsOnly() && !hasInclude
 
 	catLogger := o.Logger.WithField("catalog", ctlg.Catalog)
+	ctlgRef := ctlg.Catalog //applies for all docker-v2 remote catalogs
+	if ctlg.IsFBCOCI() {
+		_, _, repo, _, _ := image.ParseImageReference(ctlg.Catalog)
+
+		artifactsPath := artifactsFolderName
+
+		operatorCatalog := image.TrimProtocol(ctlg.Catalog)
+
+		// check for the valid config label to use
+		configsLabel, err := o.GetCatalogConfigPath(ctx, operatorCatalog)
+		if err != nil {
+
+			return nil, ic, fmt.Errorf("unable to retrieve configs layer for image %s:\n%v\nMake sure this catalog is in OCI format", ctlg.Catalog, err)
+		}
+		// initialize path starting with <current working directory>/olm_artifacts/<repo>
+		catalogContentsDir := filepath.Join(artifactsPath, repo)
+		// initialize path where we assume the catalog config dir is <current working directory>/olm_artifacts/<repo>/<config folder>
+		ctlgRef = filepath.Join(catalogContentsDir, configsLabel)
+
+	}
 	if full {
 		// Mirror the entire catalog.
 		dc, err = action.Render{
 			Registry: reg,
-			Refs:     []string{ctlg.Catalog},
+			Refs:     []string{ctlgRef}, // /home/skhoury/oc-catalog2 => configs dir olm_artifacts/oci-catalog2/configs
 		}.Run(ctx)
 		if err != nil {
 			return dc, ic, err
@@ -196,7 +236,7 @@ func (o *OperatorOptions) renderDCFull(ctx context.Context, reg *containerdregis
 		}
 		dc, err = diff.Diff{
 			Registry:         reg,
-			NewRefs:          []string{ctlg.Catalog},
+			NewRefs:          []string{ctlgRef},
 			Logger:           catLogger,
 			IncludeConfig:    dic,
 			SkipDependencies: ctlg.SkipDependencies,
@@ -256,9 +296,17 @@ func (o *OperatorOptions) renderDCDiff(ctx context.Context, reg *containerdregis
 
 	// Generate a heads-only diff using the catalog as a new ref and previous bundle information.
 	catLogger := o.Logger.WithField("catalog", ctlg.Catalog)
+
+	ctlgRef := ctlg.Catalog //applies for all docker-v2 remote catalogs
+	if ctlg.IsFBCOCI() {
+		ctlgRef, err = o.GetCatalogConfigPath(ctx, ctlg.Catalog)
+		if err != nil {
+			return nil, ic, fmt.Errorf("error locating Configs dir in the OCI image: %v", err)
+		}
+	}
 	a := diff.Diff{
 		Registry:         reg,
-		NewRefs:          []string{ctlg.Catalog},
+		NewRefs:          []string{ctlgRef},
 		Logger:           catLogger,
 		SkipDependencies: ctlg.SkipDependencies,
 	}
@@ -274,7 +322,7 @@ func (o *OperatorOptions) renderDCDiff(ctx context.Context, reg *containerdregis
 		icManager = operator.NewCatalogStrategy()
 		dc, err = action.Render{
 			Registry: reg,
-			Refs:     []string{ctlg.Catalog},
+			Refs:     []string{ctlgRef},
 		}.Run(ctx)
 		if err != nil {
 			return dc, ic, err
@@ -355,7 +403,7 @@ func (o *OperatorOptions) verifyDC(dic diff.DiffIncludeConfig, dc *declcfg.Decla
 }
 
 func (o *OperatorOptions) plan(ctx context.Context, dc *declcfg.DeclarativeConfig, ic v1alpha2.IncludeConfig, ctlgRef, targetCtlg imagesource.TypedImageReference) (image.TypedImageMapping, error) {
-
+	// name: skhoury/oc-catalog2 namespace : home registry empty
 	o.Logger.Debugf("Mirroring catalog %q bundle and related images", ctlgRef.Ref.Exact())
 
 	opts, err := o.newMirrorCatalogOptions(ctlgRef.Ref, filepath.Join(o.Dir, config.SourceDir))
@@ -386,14 +434,41 @@ func (o *OperatorOptions) plan(ctx context.Context, dc *declcfg.DeclarativeConfi
 	opts.ImageMirrorer = catalog.ImageMirrorerFunc(func(mapping map[imagesource.TypedImageReference]imagesource.TypedImageReference) error {
 		return nil
 	})
-
-	opts.IndexExtractor = catalog.IndexExtractorFunc(func(imagesource.TypedImageReference) (string, error) {
-		o.Logger.Debugf("returning index dir in extractor: %s", indexDir)
-		return indexDir, nil
-	})
 	opts.IndexPath = indexDir
+	if ctlgRef.Type == image.DestinationOCI {
 
-	opts.RelatedImagesParser = catalog.RelatedImagesParserFunc(parseRelatedImages)
+		// repo := ctlgRef.Ref.Name
+
+		// artifactsPath := artifactsFolderName
+
+		// operatorCatalog := ctlgRef.Ref.Exact() => home/skhoury/oc-catalog2
+
+		// check for the valid config label to use
+		// // TODO Fix this temporary work around
+		// configsLabel, err := o.GetCatalogConfigPath(ctx, "/"+operatorCatalog)
+		// if err != nil {
+
+		// 	return nil, fmt.Errorf("unable to retrieve configs layer for image %s:\n%v\nMake sure this catalog is in OCI format", operatorCatalog, err)
+		// }
+		// // initialize path starting with <current working directory>/olm_artifacts/<repo>
+		// catalogContentsDir := filepath.Join(artifactsPath, repo)
+		// // initialize path where we assume the catalog config dir is <current working directory>/olm_artifacts/<repo>/<config folder>
+		// pathToIndex := filepath.Join(catalogContentsDir, configsLabel)
+
+		// TODO fix this temporary workaround
+		opts.IndexPath = "/home/skhoury/go/src/github.com/openshift/oc-mirror/olm_artifacts/oci-catalog2/configs"
+	}
+	opts.IndexExtractor = catalog.IndexExtractorFunc(func(imagesource.TypedImageReference) (string, error) {
+		o.Logger.Debugf("returning index dir in extractor: %s", opts.IndexPath)
+		return opts.IndexPath, nil
+	})
+
+	if ctlgRef.Type == image.DestinationOCI {
+		opts.RelatedImagesParser = catalog.RelatedImagesParserFunc(parseOCICtlgRelatedImages)
+	} else { // it's possible we'd need to skip and call bulkImageMirror instead
+		opts.RelatedImagesParser = catalog.RelatedImagesParserFunc(parseRelatedImages)
+
+	}
 	opts.MaxICSPSize = icspSizeLimit
 	opts.SourceRef = ctlgRef
 	opts.DestRef = imagesource.TypedImageReference{
@@ -404,11 +479,11 @@ func (o *OperatorOptions) plan(ctx context.Context, dc *declcfg.DeclarativeConfi
 		return nil, fmt.Errorf("invalid catalog mirror options: %v", err)
 	}
 
-	if err := opts.Run(); err != nil {
+	if err := opts.Run(); err != nil { // mappings.txt
 		return nil, fmt.Errorf("error running catalog mirror: %v", err)
 	}
 
-	mappingFile := filepath.Join(opts.ManifestDir, mappingFile)
+	mappingFile := filepath.Join(opts.ManifestDir, mappingFile) // re-read mappung from disk
 	mappings, err := image.ReadImageMapping(mappingFile, "=", v1alpha2.TypeOperatorBundle)
 	if err != nil {
 		return nil, err
@@ -421,9 +496,10 @@ func (o *OperatorOptions) plan(ctx context.Context, dc *declcfg.DeclarativeConfi
 		return nil, err
 	}
 	mappings.Remove(ctlgImg)
-	if err := o.writeLayout(ctx, ctlgRef.Ref, targetCtlg.Ref); err != nil {
-		return nil, err
-	}
+	// TODO unskip - not working for now: attempts to HTTPS Get the image when it's on disk
+	// if err := o.writeLayout(ctx, ctlgRef.Ref, targetCtlg.Ref); err != nil {
+	// 	return nil, err
+	// }
 
 	// Remove catalog namespace prefix from each mapping's destination, which is added by opts.Run().
 	for srcRef, dstRef := range mappings {
@@ -544,7 +620,7 @@ func (o *OperatorOptions) writeLayout(ctx context.Context, ctlgRef, targetCtlg i
 	if err != nil {
 		return err
 	}
-	desc, err := remote.Get(ref, getRemoteOpts(ctx, o.insecure)...)
+	desc, err := remote.Get(ref, getRemoteOpts(ctx, o.insecure)...) // dockerhub.io/home/skhoury/oci-catalog2
 	if err != nil {
 		return err
 	}
@@ -669,6 +745,49 @@ type declcfgRelatedImage struct {
 }
 
 func parseRelatedImages(root string) (map[string]struct{}, error) {
+	rootFS := os.DirFS(root)
+
+	matcher, err := ignore.NewMatcher(rootFS, ".indexignore")
+	if err != nil {
+		return nil, err
+	}
+
+	relatedImages := map[string]struct{}{}
+	if err := fs.WalkDir(rootFS, ".", func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() || matcher.Match(path, false) {
+			return nil
+		}
+		f, err := rootFS.Open(path)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		dec := yaml.NewYAMLOrJSONDecoder(f, 4096)
+		for {
+			var blob declcfgMeta
+			if err := dec.Decode(&blob); err != nil {
+				if err == io.EOF {
+					break
+				}
+				return err
+			}
+			relatedImages[blob.Image] = struct{}{}
+			for _, ri := range blob.RelatedImages {
+				relatedImages[ri.Image] = struct{}{}
+			}
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	delete(relatedImages, "")
+	return relatedImages, nil
+}
+
+func parseOCICtlgRelatedImages(root string) (map[string]struct{}, error) {
 	rootFS := os.DirFS(root)
 
 	matcher, err := ignore.NewMatcher(rootFS, ".indexignore")
