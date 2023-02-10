@@ -31,7 +31,7 @@ const (
 
 // TypedImage defines an a image with the destination and content type
 type TypedImage struct {
-	imagesource.TypedImageReference
+	TypedImageReference
 	ImageFormat Format
 	// Category adds image category type to TypedImageReference
 	Category v1alpha2.ImageType
@@ -39,7 +39,7 @@ type TypedImage struct {
 
 // ParseTypedImage will create a TypedImage from a string and type
 func ParseTypedImage(image string, typ v1alpha2.ImageType) (TypedImage, error) {
-	ref, err := imagesource.ParseReference(image)
+	ref, err := ParseReference(image)
 	if err != nil {
 		return TypedImage{}, err
 	}
@@ -95,7 +95,7 @@ func (m TypedImageMapping) Merge(in TypedImageMapping) {
 }
 
 // Add stores a key-value pair into image map
-func (m TypedImageMapping) Add(srcRef, dstRef imagesource.TypedImageReference, typ v1alpha2.ImageType) {
+func (m TypedImageMapping) Add(srcRef, dstRef TypedImageReference, typ v1alpha2.ImageType) {
 	srcTypedRef := TypedImage{
 		TypedImageReference: srcRef,
 		Category:            typ,

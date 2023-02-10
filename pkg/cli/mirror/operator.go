@@ -13,21 +13,19 @@ import (
 
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/remotes"
-	"github.com/containers/image/v5/copy"
-	"github.com/containers/image/v5/types"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/empty"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/joelanford/ignore"
-	"github.com/opencontainers/go-digest"
 	imgreference "github.com/openshift/library-go/pkg/image/reference"
 	"github.com/openshift/oc/pkg/cli/admin/catalog"
 	"github.com/openshift/oc/pkg/cli/image/imagesource"
 	"github.com/operator-framework/operator-registry/alpha/action"
 	"github.com/operator-framework/operator-registry/alpha/declcfg"
 	"github.com/operator-framework/operator-registry/pkg/image/containerdregistry"
+	"github.com/otiai10/copy"
 	"github.com/sirupsen/logrus"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/yaml"
@@ -105,33 +103,10 @@ func (o *OperatorOptions) run(ctx context.Context, cfg v1alpha2.ImageSetConfigur
 
 	mmapping := image.TypedImageMapping{}
 	for _, ctlg := range cfg.Mirror.Operators {
-		if ctlg.IsFBCOCI() {
-			o.remoteRegFuncs = RemoteRegFuncs{
-				copy:           copy.Image,
-				mirrorMappings: o.mirrorMappings,
-				newImageSource: func(ctx context.Context, sys *types.SystemContext, imgRef types.ImageReference) (types.ImageSource, error) {
-					return imgRef.NewImageSource(ctx, sys)
-				},
-				getManifest: func(ctx context.Context, instanceDigest *digest.Digest, imgSrc types.ImageSource) ([]byte, string, error) {
-					return imgSrc.GetManifest(ctx, instanceDigest)
-				},
-				handleMetadata:     o.handleMetadata,
-				m2mWorkflowWrapper: o.mirrorToMirrorWrapper,
-			}
-
-			cleanup := func() error {
-				if !o.SkipCleanup {
-					return os.RemoveAll(filepath.Join(o.Dir, config.SourceDir))
-				}
-				return nil
-			}
-			o.bulkImageMirror(ctx, &cfg, o.ToMirror, o.UserNamespace, cleanup)
-		}
 		ctlgRef, err := image.ParseReference(ctlg.Catalog)
 		if err != nil {
-			return nil, fmt.Errorf("error parsing catalog: %v", err)
+			return nil, err
 		}
-
 		targetName, err := ctlg.GetUniqueName()
 		if err != nil {
 			return nil, err
@@ -139,10 +114,6 @@ func (o *OperatorOptions) run(ctx context.Context, cfg v1alpha2.ImageSetConfigur
 		targetCtlg, err := image.ParseReference(targetName)
 		if err != nil {
 			return nil, fmt.Errorf("error parsing catalog: %v", err)
-		}
-		if ctlg.IsFBCOCI() {
-			targetCtlg.Type = image.DestinationOCI
-			targetCtlg.Ref.ID = "1234" //TODO take the solution from brach ocpbugs-5085-2
 		}
 
 		// Render the catalog to mirror into a declarative config.
@@ -156,6 +127,7 @@ func (o *OperatorOptions) run(ctx context.Context, cfg v1alpha2.ImageSetConfigur
 			return nil, err
 		}
 		mmapping.Merge(mappings)
+
 	}
 
 	return mmapping, nil
@@ -201,11 +173,11 @@ func (o *OperatorOptions) renderDCFull(ctx context.Context, reg *containerdregis
 	catLogger := o.Logger.WithField("catalog", ctlg.Catalog)
 	ctlgRef := ctlg.Catalog //applies for all docker-v2 remote catalogs
 	if ctlg.IsFBCOCI() {
-		_, _, repo, _, _ := image.ParseImageReference(ctlg.Catalog)
+		_, _, repo, _, _ := v1alpha2.ParseImageReference(ctlg.Catalog)
 
 		artifactsPath := artifactsFolderName
 
-		operatorCatalog := image.TrimProtocol(ctlg.Catalog)
+		operatorCatalog := v1alpha2.TrimProtocol(ctlg.Catalog)
 
 		// check for the valid config label to use
 		configsLabel, err := o.GetCatalogConfigPath(ctx, operatorCatalog)
@@ -402,7 +374,7 @@ func (o *OperatorOptions) verifyDC(dic diff.DiffIncludeConfig, dc *declcfg.Decla
 	return nil
 }
 
-func (o *OperatorOptions) plan(ctx context.Context, dc *declcfg.DeclarativeConfig, ic v1alpha2.IncludeConfig, ctlgRef, targetCtlg imagesource.TypedImageReference) (image.TypedImageMapping, error) {
+func (o *OperatorOptions) plan(ctx context.Context, dc *declcfg.DeclarativeConfig, ic v1alpha2.IncludeConfig, ctlgRef, targetCtlg image.TypedImageReference) (image.TypedImageMapping, error) {
 	// name: skhoury/oc-catalog2 namespace : home registry empty
 	o.Logger.Debugf("Mirroring catalog %q bundle and related images", ctlgRef.Ref.Exact())
 
@@ -426,64 +398,80 @@ func (o *OperatorOptions) plan(ctx context.Context, dc *declcfg.DeclarativeConfi
 		return nil, err
 	}
 
-	// Create the mapping file, but don't mirror quite yet.
-	// Since the file-based catalog (declarative config) needs to be rebuilt
-	// after rendering with the existing image in the publishing step,
-	// we can just build the new image once then.
-	opts.ManifestOnly = true
-	opts.ImageMirrorer = catalog.ImageMirrorerFunc(func(mapping map[imagesource.TypedImageReference]imagesource.TypedImageReference) error {
-		return nil
-	})
-	opts.IndexPath = indexDir
-	if ctlgRef.Type == image.DestinationOCI {
+	mappingFile := filepath.Join(opts.ManifestDir, mappingFile) // re-read mappung from disk
 
-		// repo := ctlgRef.Ref.Name
+	if ctlgRef.Type != image.DestinationOCI {
+		// Create the mapping file, but don't mirror quite yet.
+		// Since the file-based catalog (declarative config) needs to be rebuilt
+		// after rendering with the existing image in the publishing step,
+		// we can just build the new image once then.
+		opts.ManifestOnly = true
+		opts.ImageMirrorer = catalog.ImageMirrorerFunc(func(mapping map[imagesource.TypedImageReference]imagesource.TypedImageReference) error {
+			return nil
+		})
+		opts.IndexPath = indexDir
 
-		// artifactsPath := artifactsFolderName
+		opts.IndexExtractor = catalog.IndexExtractorFunc(func(imagesource.TypedImageReference) (string, error) {
+			o.Logger.Debugf("returning index dir in extractor: %s", opts.IndexPath)
+			return opts.IndexPath, nil
+		})
 
-		// operatorCatalog := ctlgRef.Ref.Exact() => home/skhoury/oc-catalog2
-
-		// check for the valid config label to use
-		// // TODO Fix this temporary work around
-		// configsLabel, err := o.GetCatalogConfigPath(ctx, "/"+operatorCatalog)
-		// if err != nil {
-
-		// 	return nil, fmt.Errorf("unable to retrieve configs layer for image %s:\n%v\nMake sure this catalog is in OCI format", operatorCatalog, err)
-		// }
-		// // initialize path starting with <current working directory>/olm_artifacts/<repo>
-		// catalogContentsDir := filepath.Join(artifactsPath, repo)
-		// // initialize path where we assume the catalog config dir is <current working directory>/olm_artifacts/<repo>/<config folder>
-		// pathToIndex := filepath.Join(catalogContentsDir, configsLabel)
-
-		// TODO fix this temporary workaround
-		opts.IndexPath = "/home/skhoury/go/src/github.com/openshift/oc-mirror/olm_artifacts/oci-catalog2/configs"
-	}
-	opts.IndexExtractor = catalog.IndexExtractorFunc(func(imagesource.TypedImageReference) (string, error) {
-		o.Logger.Debugf("returning index dir in extractor: %s", opts.IndexPath)
-		return opts.IndexPath, nil
-	})
-
-	if ctlgRef.Type == image.DestinationOCI {
-		opts.RelatedImagesParser = catalog.RelatedImagesParserFunc(parseOCICtlgRelatedImages)
-	} else { // it's possible we'd need to skip and call bulkImageMirror instead
 		opts.RelatedImagesParser = catalog.RelatedImagesParserFunc(parseRelatedImages)
 
-	}
-	opts.MaxICSPSize = icspSizeLimit
-	opts.SourceRef = ctlgRef
-	opts.DestRef = imagesource.TypedImageReference{
-		Type: imagesource.DestinationFile,
-	}
+		opts.MaxICSPSize = icspSizeLimit
+		opts.SourceRef = imagesource.TypedImageReference{
+			Ref:  ctlgRef.Ref,
+			Type: ctlgRef.Type,
+		}
+		opts.DestRef = imagesource.TypedImageReference{
+			Type: imagesource.DestinationFile,
+		}
 
-	if err := opts.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid catalog mirror options: %v", err)
-	}
+		if err := opts.Validate(); err != nil {
+			return nil, fmt.Errorf("invalid catalog mirror options: %v", err)
+		}
 
-	if err := opts.Run(); err != nil { // mappings.txt
-		return nil, fmt.Errorf("error running catalog mirror: %v", err)
-	}
+		if err := opts.Run(); err != nil { // mappings.txt
+			return nil, fmt.Errorf("error running catalog mirror: %v", err)
+		}
+	} else {
+		repo := ctlgRef.Ref.Name
 
-	mappingFile := filepath.Join(opts.ManifestDir, mappingFile) // re-read mappung from disk
+		artifactsPath := artifactsFolderName
+
+		operatorCatalog := v1alpha2.TrimProtocol(ctlgRef.OCIFBCPath)
+
+		// check for the valid config label to use
+		configsLabel, err := o.GetCatalogConfigPath(ctx, operatorCatalog)
+		if err != nil {
+
+			return nil, fmt.Errorf("unable to retrieve configs layer for image %s:\n%v\nMake sure this catalog is in OCI format", operatorCatalog, err)
+		}
+		// initialize path starting with <current working directory>/olm_artifacts/<repo>
+		catalogContentsDir := filepath.Join(artifactsPath, repo)
+		// initialize path where we assume the catalog config dir is <current working directory>/olm_artifacts/<repo>/<config folder>
+		ctlgConfigDir := filepath.Join(catalogContentsDir, configsLabel)
+		relatedImages, err := getRelatedImages(ctlgConfigDir, ic.Packages)
+		if err != nil {
+			return nil, err
+		}
+
+		// place related images into the workspace - aka mirrorToDisk
+		// TODO this should probably be done only if artifacts have not been copied
+		result := image.TypedImageMapping{}
+		// create mappings for the related images that will moved from the workspace to the final destination
+		for _, i := range relatedImages {
+			// intentionally removed the usernamespace from the call, because mirror.go is going to add it back!!
+			err := addRelatedImageToMapping(result, i, o.ToMirror, "")
+			if err != nil {
+				return nil, err
+			}
+
+		}
+		if err := writeMappingFile(mappingFile, result); err != nil {
+			return nil, err
+		}
+	}
 	mappings, err := image.ReadImageMapping(mappingFile, "=", v1alpha2.TypeOperatorBundle)
 	if err != nil {
 		return nil, err
@@ -496,10 +484,25 @@ func (o *OperatorOptions) plan(ctx context.Context, dc *declcfg.DeclarativeConfi
 		return nil, err
 	}
 	mappings.Remove(ctlgImg)
-	// TODO unskip - not working for now: attempts to HTTPS Get the image when it's on disk
-	// if err := o.writeLayout(ctx, ctlgRef.Ref, targetCtlg.Ref); err != nil {
-	// 	return nil, err
-	// }
+	// Write catalog OCI layout file to src so it is included in the archive
+	// at a path unique to the image.
+	if ctlgRef.Type != image.DestinationOCI {
+		if err := o.writeLayout(ctx, ctlgRef.Ref, targetCtlg.Ref); err != nil {
+			return nil, err
+		}
+	} else {
+		ctlgDir, err := operator.GenerateCatalogDir(targetCtlg.Ref)
+		if err != nil {
+			return nil, err
+		}
+		layoutDir := filepath.Join(o.Dir, config.SourceDir, config.CatalogsDir, ctlgDir, config.LayoutsDir)
+		if err := os.MkdirAll(layoutDir, os.ModePerm); err != nil {
+			return nil, fmt.Errorf("error catalog layout dir: %v", err)
+		}
+		if err := copy.Copy(v1alpha2.TrimProtocol(ctlgRef.OCIFBCPath), layoutDir); err != nil {
+			return nil, fmt.Errorf("error copying oci fbc catalog to layout directory: %v", err)
+		}
+	}
 
 	// Remove catalog namespace prefix from each mapping's destination, which is added by opts.Run().
 	for srcRef, dstRef := range mappings {
@@ -620,7 +623,7 @@ func (o *OperatorOptions) writeLayout(ctx context.Context, ctlgRef, targetCtlg i
 	if err != nil {
 		return err
 	}
-	desc, err := remote.Get(ref, getRemoteOpts(ctx, o.insecure)...) // dockerhub.io/home/skhoury/oci-catalog2
+	desc, err := remote.Get(ref, getRemoteOpts(ctx, o.insecure)...)
 	if err != nil {
 		return err
 	}

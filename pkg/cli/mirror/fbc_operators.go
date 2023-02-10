@@ -35,7 +35,6 @@ import (
 
 const (
 	blobsPath           string = "/blobs/sha256/"
-	ociProtocol         string = "oci:"
 	dockerProtocol      string = "docker://"
 	configPath          string = "configs/"
 	catalogJSON         string = "/catalog.json"
@@ -90,7 +89,7 @@ func (o *MirrorOptions) bulkImageMirror(ctx context.Context, isc *v1alpha2.Image
 		if !operator.IsFBCOCI() {
 			continue
 		}
-		_, _, repo, _, _ := image.ParseImageReference(operator.Catalog)
+		_, _, repo, _, _ := v1alpha2.ParseImageReference(operator.Catalog)
 		log.Printf("INFO: processing contents of local catalog %s\n", operator.Catalog)
 
 		// assume that the artifacts are placed in the <current working directory>/olm_artifacts
@@ -102,7 +101,7 @@ func (o *MirrorOptions) bulkImageMirror(ctx context.Context, isc *v1alpha2.Image
 		// if it does not exist the function findFBCConfig needs to be called to setup the appropriate directory structures
 		// and the directory names need to change
 
-		operatorCatalog := image.TrimProtocol(operator.Catalog)
+		operatorCatalog := v1alpha2.TrimProtocol(operator.Catalog)
 
 		// check for the valid config label to use
 		configsLabel, err := o.GetCatalogConfigPath(ctx, operatorCatalog)
@@ -265,7 +264,7 @@ func addRelatedImageToMapping(mapping image.TypedImageMapping, img declcfg.Relat
 	}
 
 	from, to := "", ""
-	_, subns, imgName, tag, sha := image.ParseImageReference(img.Image)
+	_, subns, imgName, tag, sha := v1alpha2.ParseImageReference(img.Image)
 	if imgName == "" {
 		return fmt.Errorf("invalid related image %s: repository name empty", img.Image)
 	}
@@ -282,11 +281,11 @@ func addRelatedImageToMapping(mapping image.TypedImageMapping, img declcfg.Relat
 		}
 	}
 	from = strings.Join(parts, "/")
-	if sha != "" {
-		from = from + "/" + strings.TrimPrefix(sha, "sha256:")
-	} else if sha == "" && tag != "" {
-		from = from + "/" + fmt.Sprintf("%x", sha256.Sum256([]byte(tag)))[0:6]
-	}
+	// if sha != "" {
+	// 	from = from + "/" + strings.TrimPrefix(sha, "sha256:")
+	// } else if sha == "" && tag != "" {
+	// 	from = from + "/" + fmt.Sprintf("%x", sha256.Sum256([]byte(tag)))[0:6]
+	// }
 	to = destReg
 	if namespace != "" {
 		to = strings.Join([]string{to, namespace}, "/")
@@ -300,6 +299,7 @@ func addRelatedImageToMapping(mapping image.TypedImageMapping, img declcfg.Relat
 	} else {
 		to = to + "@sha256:" + sha
 	}
+	// TODO : why file:// ? can we be more smart about setting the transport protocol
 	srcTIR, err := image.ParseReference("file://" + strings.ToLower(from))
 	if err != nil {
 		return err
@@ -340,7 +340,7 @@ func prepareDestCatalogRef(operator v1alpha2.Operator, destReg, namespace string
 	if destReg == "" {
 		return "", errors.New("destination registry may not be empty")
 	}
-	_, subNamespace, repo, tag, _ := image.ParseImageReference(operator.Catalog)
+	_, subNamespace, repo, tag, _ := v1alpha2.ParseImageReference(operator.Catalog)
 
 	to := "docker://" + destReg
 	if namespace != "" {
@@ -363,7 +363,7 @@ func prepareDestCatalogRef(operator v1alpha2.Operator, destReg, namespace string
 		to += ":" + tag
 	}
 	//check if this is a valid reference
-	_, err := image.ParseReference(image.TrimProtocol(to))
+	_, err := image.ParseReference(v1alpha2.TrimProtocol(to))
 	return to, err
 }
 
@@ -387,7 +387,7 @@ func addCatalogToMapping(catalogMapping image.TypedImageMapping, srcOperator v1a
 		return err
 	}
 
-	ctlgDstTIR, err := image.ParseReference(image.TrimProtocol(destRef))
+	ctlgDstTIR, err := image.ParseReference(v1alpha2.TrimProtocol(destRef))
 	if err != nil {
 		return err
 	}
@@ -419,7 +419,7 @@ func addCatalogToMapping(catalogMapping image.TypedImageMapping, srcOperator v1a
 		Category:            v1alpha2.TypeOperatorCatalog,
 	}
 
-	if image.IsFBCOCI(srcCtlgRef) {
+	if srcOperator.IsFBCOCI() {
 		ctlgSrcTI.ImageFormat = image.OCIFormat
 		ctlgDstTI.ImageFormat = image.OCIFormat
 	}
@@ -657,7 +657,7 @@ func findFirstAvailableMirror(ctx context.Context, mirrors []sysregistriesv2.End
 			finalError = fmt.Errorf("%w: unable to get Manifest for %s: %v", finalError, mirroredImage, err)
 			continue
 		} else {
-			return image.TrimProtocol(mirroredImage), nil
+			return v1alpha2.TrimProtocol(mirroredImage), nil
 		}
 	}
 	return "", finalError
@@ -752,7 +752,7 @@ func UntarLayers(gzipStream io.Reader, path string, cfgDirName string) error {
 func (o *MirrorOptions) copyImage(ctx context.Context, from, to string, funcs RemoteRegFuncs) (digest.Digest, error) {
 	if !strings.HasPrefix(from, "docker") {
 		// find absolute path if from is a relative path
-		fromPath := image.TrimProtocol(from)
+		fromPath := v1alpha2.TrimProtocol(from)
 		if !strings.HasPrefix(fromPath, "/") {
 			absolutePath, err := filepath.Abs(fromPath)
 			if err != nil {

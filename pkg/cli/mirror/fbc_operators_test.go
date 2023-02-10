@@ -1057,7 +1057,7 @@ func TestGenerateSrcToFileMapping(t *testing.T) {
 			expErr: "",
 			expMapping: image.TypedImageMapping{
 				image.TypedImage{
-					TypedImageReference: imagesource.TypedImageReference{
+					TypedImageReference: image.TypedImageReference{
 						Type: "docker",
 						Ref: reference.DockerImageReference{
 							Registry:  "quay.io",
@@ -1069,7 +1069,7 @@ func TestGenerateSrcToFileMapping(t *testing.T) {
 					},
 					Category: v1alpha2.TypeOperatorRelatedImage,
 				}: image.TypedImage{
-					TypedImageReference: imagesource.TypedImageReference{
+					TypedImageReference: image.TypedImageReference{
 						Type: "file",
 						Ref: reference.DockerImageReference{
 							Registry:  "quay.io",
@@ -1083,7 +1083,7 @@ func TestGenerateSrcToFileMapping(t *testing.T) {
 				},
 
 				image.TypedImage{
-					TypedImageReference: imagesource.TypedImageReference{
+					TypedImageReference: image.TypedImageReference{
 						Type: "docker",
 						Ref: reference.DockerImageReference{
 							Registry:  "quay.io",
@@ -1095,7 +1095,7 @@ func TestGenerateSrcToFileMapping(t *testing.T) {
 					},
 					Category: v1alpha2.TypeOperatorRelatedImage,
 				}: image.TypedImage{
-					TypedImageReference: imagesource.TypedImageReference{
+					TypedImageReference: image.TypedImageReference{
 						Type: "file",
 						Ref: reference.DockerImageReference{
 							Registry:  "quay.io",
@@ -1109,7 +1109,7 @@ func TestGenerateSrcToFileMapping(t *testing.T) {
 				},
 
 				image.TypedImage{
-					TypedImageReference: imagesource.TypedImageReference{
+					TypedImageReference: image.TypedImageReference{
 						Type: "docker",
 						Ref: reference.DockerImageReference{
 							Registry:  "quay.io",
@@ -1121,7 +1121,7 @@ func TestGenerateSrcToFileMapping(t *testing.T) {
 					},
 					Category: v1alpha2.TypeOperatorRelatedImage,
 				}: image.TypedImage{
-					TypedImageReference: imagesource.TypedImageReference{
+					TypedImageReference: image.TypedImageReference{
 						Type: "file",
 						Ref: reference.DockerImageReference{
 							Registry:  "quay.io",
@@ -1164,7 +1164,7 @@ func TestGenerateSrcToFileMapping(t *testing.T) {
 			expErr: "",
 			expMapping: image.TypedImageMapping{
 				image.TypedImage{
-					TypedImageReference: imagesource.TypedImageReference{
+					TypedImageReference: image.TypedImageReference{
 						Type: "docker",
 						Ref: reference.DockerImageReference{
 							Registry:  "preprodlocation.in",
@@ -1176,7 +1176,7 @@ func TestGenerateSrcToFileMapping(t *testing.T) {
 					},
 					Category: v1alpha2.TypeOperatorRelatedImage,
 				}: image.TypedImage{
-					TypedImageReference: imagesource.TypedImageReference{
+					TypedImageReference: image.TypedImageReference{
 						Type: "file",
 						Ref: reference.DockerImageReference{
 							Registry:  "preprodlocation.in",
@@ -1331,7 +1331,7 @@ func TestAddCatalogToMapping(t *testing.T) {
 			expMapping: image.TypedImageMapping{
 
 				image.TypedImage{
-					TypedImageReference: imagesource.TypedImageReference{
+					TypedImageReference: image.TypedImageReference{
 						Type: image.DestinationOCI,
 						Ref: reference.DockerImageReference{
 							Registry:  "",
@@ -1344,7 +1344,7 @@ func TestAddCatalogToMapping(t *testing.T) {
 					Category:    v1alpha2.TypeOperatorCatalog,
 					ImageFormat: image.OCIFormat,
 				}: image.TypedImage{
-					TypedImageReference: imagesource.TypedImageReference{
+					TypedImageReference: image.TypedImageReference{
 						Type: "docker",
 						Ref: reference.DockerImageReference{
 							Registry:  "localhost:5000",
@@ -1381,7 +1381,7 @@ func TestAddCatalogToMapping(t *testing.T) {
 			expMapping: image.TypedImageMapping{
 
 				image.TypedImage{
-					TypedImageReference: imagesource.TypedImageReference{
+					TypedImageReference: image.TypedImageReference{
 						Type: imagesource.DestinationRegistry,
 						Ref: reference.DockerImageReference{
 							Registry:  "registry.redhat.io",
@@ -1393,7 +1393,7 @@ func TestAddCatalogToMapping(t *testing.T) {
 					},
 					Category: v1alpha2.TypeOperatorCatalog,
 				}: image.TypedImage{
-					TypedImageReference: imagesource.TypedImageReference{
+					TypedImageReference: image.TypedImageReference{
 						Type: "docker",
 						Ref: reference.DockerImageReference{
 							Registry:  "localhost:5000",
@@ -1460,7 +1460,7 @@ func TestAddRelatedImageToMapping(t *testing.T) {
 			expMapping: image.TypedImageMapping{
 
 				image.TypedImage{
-					TypedImageReference: imagesource.TypedImageReference{
+					TypedImageReference: image.TypedImageReference{
 						Type: "file",
 						Ref: reference.DockerImageReference{
 							Registry:  "registry.redhat.io",
@@ -1471,7 +1471,7 @@ func TestAddRelatedImageToMapping(t *testing.T) {
 					},
 					Category: v1alpha2.TypeOperatorRelatedImage,
 				}: image.TypedImage{
-					TypedImageReference: imagesource.TypedImageReference{
+					TypedImageReference: image.TypedImageReference{
 						Type: "docker",
 						Ref: reference.DockerImageReference{
 							Registry:  "localhost:5000",
@@ -1497,7 +1497,7 @@ func TestAddRelatedImageToMapping(t *testing.T) {
 			expMapping: image.TypedImageMapping{
 
 				image.TypedImage{
-					TypedImageReference: imagesource.TypedImageReference{
+					TypedImageReference: image.TypedImageReference{
 						Type: "file",
 						Ref: reference.DockerImageReference{
 							Registry:  "quay.io",
@@ -1508,7 +1508,7 @@ func TestAddRelatedImageToMapping(t *testing.T) {
 					},
 					Category: v1alpha2.TypeOperatorRelatedImage,
 				}: image.TypedImage{
-					TypedImageReference: imagesource.TypedImageReference{
+					TypedImageReference: image.TypedImageReference{
 						Type: "docker",
 						Ref: reference.DockerImageReference{
 							Registry:  "localhost:5000",
@@ -1534,7 +1534,7 @@ func TestAddRelatedImageToMapping(t *testing.T) {
 			expMapping: image.TypedImageMapping{
 
 				image.TypedImage{
-					TypedImageReference: imagesource.TypedImageReference{
+					TypedImageReference: image.TypedImageReference{
 						Type: "file",
 						Ref: reference.DockerImageReference{
 							Registry:  "quay.io",
@@ -1545,7 +1545,7 @@ func TestAddRelatedImageToMapping(t *testing.T) {
 					},
 					Category: v1alpha2.TypeOperatorRelatedImage,
 				}: image.TypedImage{
-					TypedImageReference: imagesource.TypedImageReference{
+					TypedImageReference: image.TypedImageReference{
 						Type: "docker",
 						Ref: reference.DockerImageReference{
 							Registry:  "localhost:5000",
