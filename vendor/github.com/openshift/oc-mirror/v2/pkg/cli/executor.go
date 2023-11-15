@@ -443,7 +443,8 @@ func (o *ExecutorSchema) Run(cmd *cobra.Command, args []string) error {
 
 	collectionFinish := time.Now()
 	ctx := cmd.Context()
-	blobGatherer := archive.NewStoreBlobGatherer(o.CacheRootDir())
+	// blobGatherer := archive.NewStoreBlobGatherer(o.CacheRootDir())
+	blobGatherer := archive.NewImageBlobGatherer(ctx, &o.Opts)
 	blobs, err := blobGatherer.GatherBlobs(allRelatedImages[0].Destination)
 	if err != nil {
 		cleanUp()
