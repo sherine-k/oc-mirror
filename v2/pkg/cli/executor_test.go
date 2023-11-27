@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"testing"
 
 	"github.com/openshift/oc-mirror/v2/pkg/api/v1alpha2"
@@ -51,6 +52,7 @@ func TestExecutor(t *testing.T) {
 	t.Run("Testing Executor : should pass", func(t *testing.T) {
 		collector := &Collector{Log: log, Config: cfg, Opts: opts, Fail: false}
 		batch := &Batch{Log: log, Config: cfg, Opts: opts}
+		archiver := MockArchiver{opts.Destination}
 		ex := &ExecutorSchema{
 			Log:              log,
 			Config:           cfg,
@@ -59,6 +61,7 @@ func TestExecutor(t *testing.T) {
 			Release:          collector,
 			AdditionalImages: collector,
 			Batch:            batch,
+			MirrorArchiver:   archiver,
 		}
 
 		res := &cobra.Command{}
@@ -202,6 +205,10 @@ type Diff struct {
 	Fail   bool
 }
 
+type MockArchiver struct {
+	destination string
+}
+
 func (o *Diff) DeleteImages(ctx context.Context) error {
 	return nil
 }
@@ -260,4 +267,12 @@ func (o *Collector) AdditionalImagesCollector(ctx context.Context) ([]v1alpha3.C
 		{Source: "docker://registry/name/namespace/sometestimage-f@sha256:f30638f60452062aba36a26ee6c036feead2f03b28f2c47f2b0a991e41baebea", Destination: "oci:test"},
 	}
 	return test, nil
+}
+
+func (o MockArchiver) BuildArchive(ctx context.Context, collectedImages []v1alpha3.CopyImageSchema) (string, error) {
+	return filepath.Join(o.destination, "mirror_000001.tar"), nil
+}
+
+func (o MockArchiver) Close() error {
+	return nil
 }

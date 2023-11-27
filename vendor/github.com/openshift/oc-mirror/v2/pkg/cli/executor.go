@@ -23,6 +23,7 @@ import (
 	"github.com/openshift/oc-mirror/v2/pkg/additional"
 	"github.com/openshift/oc-mirror/v2/pkg/api/v1alpha2"
 	"github.com/openshift/oc-mirror/v2/pkg/api/v1alpha3"
+	"github.com/openshift/oc-mirror/v2/pkg/archive"
 	"github.com/openshift/oc-mirror/v2/pkg/batch"
 	"github.com/openshift/oc-mirror/v2/pkg/clusterresources"
 	"github.com/openshift/oc-mirror/v2/pkg/config"
@@ -73,19 +74,21 @@ var (
 )
 
 type ExecutorSchema struct {
-	Log              clog.PluggableLoggerInterface
-	Config           v1alpha2.ImageSetConfiguration
-	Opts             mirror.CopyOptions
-	Operator         operator.CollectorInterface
-	Release          release.CollectorInterface
-	AdditionalImages additional.CollectorInterface
-	Mirror           mirror.MirrorInterface
-	Manifest         manifest.ManifestInterface
-	Batch            batch.BatchInterface
-	LocalStorage     registry.Registry
-	LocalStorageFQDN string
-	ClusterResources clusterresources.GeneratorInterface
-	ImageBuilder     imagebuilder.ImageBuilderInterface
+	Log                 clog.PluggableLoggerInterface
+	Config              v1alpha2.ImageSetConfiguration
+	Opts                mirror.CopyOptions
+	Operator            operator.CollectorInterface
+	Release             release.CollectorInterface
+	AdditionalImages    additional.CollectorInterface
+	Mirror              mirror.MirrorInterface
+	Manifest            manifest.ManifestInterface
+	Batch               batch.BatchInterface
+	LocalStorage        registry.Registry
+	localStorageChannel chan error
+	LocalStorageFQDN    string
+	ClusterResources    clusterresources.GeneratorInterface
+	ImageBuilder        imagebuilder.ImageBuilderInterface
+	MirrorArchiver      archive.Archiver
 }
 
 // NewMirrorCmd - cobra entry point
@@ -131,13 +134,18 @@ func NewMirrorCmd(log clog.PluggableLoggerInterface) *cobra.Command {
 				log.Error("%v ", err)
 				os.Exit(1)
 			}
-			ex.Complete(args)
-			// prepare internal storage
-			err = ex.PrepareStorageAndLogs()
+			err = ex.Complete(args)
 			if err != nil {
 				log.Error(" %v ", err)
 				os.Exit(1)
 			}
+			// prepare internal storage
+			errChan, err := ex.PrepareStorageAndLogs()
+			if err != nil {
+				log.Error(" %v ", err)
+				os.Exit(1)
+			}
+			ex.localStorageChannel = errChan
 
 			err = ex.Run(cmd, args)
 			if err != nil {
@@ -184,7 +192,7 @@ func (o ExecutorSchema) Validate(dest []string) error {
 	}
 }
 
-func (o *ExecutorSchema) PrepareStorageAndLogs() error {
+func (o *ExecutorSchema) PrepareStorageAndLogs() (chan error, error) {
 
 	// clean up logs directory
 	os.RemoveAll(logsDir)
@@ -193,7 +201,7 @@ func (o *ExecutorSchema) PrepareStorageAndLogs() error {
 	err := os.MkdirAll(logsDir, 0755)
 	if err != nil {
 		o.Log.Error(" %v ", err)
-		return err
+		return nil, err
 	}
 
 	//create config file for local registry
@@ -236,7 +244,7 @@ health:
 
 	if rootDir == "" {
 		// something went wrong
-		return fmt.Errorf("error determining the local storage folder to use")
+		return nil, fmt.Errorf("error determining the local storage folder to use")
 	}
 	configYamlV0_1 = strings.Replace(configYamlV0_1, "$$PLACEHOLDER_ROOT$$", rootDir, 1)
 	configYamlV0_1 = strings.Replace(configYamlV0_1, "$$PLACEHOLDER_PORT$$", strconv.Itoa(int(o.Opts.Global.Port)), 1)
@@ -250,7 +258,7 @@ health:
 	config, err := configuration.Parse(bytes.NewReader([]byte(configYamlV0_1)))
 
 	if err != nil {
-		return fmt.Errorf("error parsing local storage configuration : %v\n %s", err, configYamlV0_1)
+		return nil, fmt.Errorf("error parsing local storage configuration : %v\n %s", err, configYamlV0_1)
 	}
 
 	regLogger := logrus.New()
@@ -273,18 +281,19 @@ health:
 	ctx := dcontext.WithVersion(dcontext.Background(), distversion.Version)
 	ctx = dcontext.WithLogger(ctx, regLogEntry)
 
+	errchan := make(chan error)
+
 	reg, err := registry.NewRegistry(ctx, config)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	o.LocalStorage = *reg
-	errchan := make(chan error)
 
 	o.Log.Info("starting local storage on %v", config.HTTP.Addr)
 
 	go startLocalRegistry(reg, errchan)
 	go panicOnRegistryError(errchan)
-	return nil
+	return errchan, nil
 }
 
 func startLocalRegistry(reg *registry.Registry, errchan chan error) {
@@ -300,14 +309,14 @@ func panicOnRegistryError(errchan chan error) {
 }
 
 // Complete - do the final setup of modules
-func (o *ExecutorSchema) Complete(args []string) {
+func (o *ExecutorSchema) Complete(args []string) error {
 	// override log level
 	o.Log.Level(o.Opts.Global.LogLevel)
 	o.Log.Debug("imagesetconfig file %s ", o.Opts.Global.ConfigPath)
 	// read the ImageSetConfiguration
 	cfg, err := config.ReadConfig(o.Opts.Global.ConfigPath)
 	if err != nil {
-		o.Log.Error("imagesetconfig %v ", err)
+		return err
 	}
 	o.Log.Trace("imagesetconfig : %v ", cfg)
 
@@ -346,6 +355,13 @@ func (o *ExecutorSchema) Complete(args []string) {
 	o.Operator = operator.New(o.Log, o.Config, o.Opts, o.Mirror, o.Manifest, o.LocalStorageFQDN)
 	o.AdditionalImages = additional.New(o.Log, o.Config, o.Opts, o.Mirror, o.Manifest, o.LocalStorageFQDN)
 	o.ClusterResources = clusterresources.New(o.Log, o.Config, o.Opts)
+	if o.Opts.IsMirrorToDisk() {
+		o.MirrorArchiver, err = archive.NewMirrorArchive(&o.Opts, o.Opts.Destination, o.Opts.Global.ConfigPath, o.Opts.Global.Dir, o.Opts.Destination, o.Log)
+		if err != nil {
+			return err
+		}
+	} // TODO : else create the unarchiver interface
+	return nil
 }
 
 // Run - start the mirror functionality
@@ -449,15 +465,20 @@ func (o *ExecutorSchema) Run(cmd *cobra.Command, args []string) error {
 	}
 
 	// Prepare tar.gz when mirror to disk
-	// if o.Opts.IsMirrorToDisk() {
-	// 	blobGatherer := archive.NewImageBlobGatherer(ctx, &o.Opts)
-	// 	blobs, err := blobGatherer.GatherBlobs(allRelatedImages[0].Destination)
-	// 	if err != nil {
-	// 		cleanUp()
-	// 		return err
-	// 	}
-	// 	o.Log.Info("blobs for %s:\n %v ", allRelatedImages[0].Destination, blobs)
-	// }
+	if o.Opts.IsMirrorToDisk() {
+		// TODO First stop the registry
+		err = NormalInterruptErrorf("end of mirroring to disk. Stopping local storage to prepare the archive")
+		o.localStorageChannel <- err
+		// Next, generate the archive
+		archiveFile, err := o.MirrorArchiver.BuildArchive(ctx, allRelatedImages)
+		if err != nil {
+			cleanUp()
+			return err
+		}
+		defer o.MirrorArchiver.Close()
+		o.Log.Info("archive file generated: %v ", archiveFile)
+
+	}
 
 	//create IDMS/ITMS
 	if o.Opts.IsDiskToMirror() {
@@ -532,11 +553,12 @@ func NewPrepareCommand(log clog.PluggableLoggerInterface) *cobra.Command {
 			}
 			ex.CompletePrepare(args)
 			// prepare internal storage
-			err = ex.PrepareStorageAndLogs()
+			errChan, err := ex.PrepareStorageAndLogs()
 			if err != nil {
 				log.Error(" %v ", err)
 				os.Exit(1)
 			}
+			ex.localStorageChannel = errChan
 
 			err = ex.RunPrepare(cmd, args)
 			if err != nil {
