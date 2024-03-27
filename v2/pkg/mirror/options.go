@@ -54,12 +54,12 @@ type GlobalOptions struct {
 	StrictArchiving    bool          // If set, generates archives that are strictly less than `archiveSize`, failing for files that exceed that limit.
 	SinceString        string        // Sets the date since which all content mirrored after is included in the archive
 	Since              time.Time     // Sets the date since which all content mirrored after is included in the archive
-	DryRun             bool          // If used will not execute the underlying functionality - used for verification
+	DeleteGenerate     bool          // Used to generate the delete-images.yaml file , mandatory fist step in the delete workflow
 	DeleteSource       string        // Used primarily for delete - denotes the origin source directory for initial mirror
 	DeleteDestination  string        // Used primarily for delete - denotes the remote registry to delete from
-	SkipCacheDelete    bool          // Used to skip deleting of local cache
-	SkipRegistryDelete bool          // Used to skip deleting of remote registry
+	ForceCacheDelete   bool          // Used to force delete the local cache
 	DeleteID           string        // This flag is used to append to the artifacts created by the delete functionality
+	DeleteYaml         string        // This flag will use the contents of the indicated yaml as basis to delete the local cache and remote registry
 }
 
 type CopyOptions struct {

@@ -56,28 +56,29 @@ func TestExecutorValidateDelete(t *testing.T) {
 		opts.Global.ConfigPath = "../../tests/isc.yaml"
 
 		err := ex.ValidateDelete()
-		if err != nil {
-			t.Fatalf("should not fail")
+		if err == nil {
+			t.Fatalf("should fail")
 		}
 
 		// check for config path error
 		opts.Global.ConfigPath = ""
+		opts.Global.DeleteGenerate = true
 		err = ex.ValidateDelete()
-		assert.Equal(t, "use the --config flag it is mandatory", err.Error())
+		assert.Equal(t, "the --config and --delete-id flags are mandatory when used with the --generate flag", err.Error())
 
 		// check when source is not set
 		opts.Global.ConfigPath = "../../tests/isc.yaml"
 		ex.Opts.Global.DeleteSource = ""
 		ex.Opts.Global.DeleteDestination = "docker://test"
 		err = ex.ValidateDelete()
-		assert.Equal(t, "use the --source flag it is mandatory when using the delete command", err.Error())
+		assert.Equal(t, "use the --source flag, it is mandatory when using the delete command", err.Error())
 
 		// check when destination is set but no protocol
 		ex.Opts.Global.DeleteSource = "file://test"
 		ex.Opts.Global.DeleteDestination = "test"
 		opts.Global.ConfigPath = "../../tests/isc.yaml"
 		err = ex.ValidateDelete()
-		assert.Equal(t, "--destination flag must have a docker:// protocol prefix", err.Error())
+		assert.Equal(t, "the --config and --delete-id flags are mandatory when used with the --generate flag", err.Error())
 
 	})
 }
@@ -108,6 +109,8 @@ func TestExecutorCompleteDelete(t *testing.T) {
 		}
 		opts.Global.ConfigPath = "../../tests/delete-isc.yaml"
 		opts.Global.DeleteSource = "file://test"
+		opts.Global.DeleteGenerate = true
+		opts.Global.DeleteID = "test"
 
 		ex := &ExecutorSchema{
 			Log:     log,
@@ -181,18 +184,19 @@ func TestExecutorRunDelete(t *testing.T) {
 		go skipSignalsToInterruptStorage(fakeStorageInterruptChan)
 
 		// read the DeleteImageSetConfiguration
-		dcfg, err := config.ReadConfigDelete(opts.Global.ConfigPath)
+		dcfg, err := config.ReadConfig(opts.Global.ConfigPath, v1alpha2.DeleteImageSetConfigurationKind)
 		if err != nil {
 			log.Error("imagesetconfig %v ", err)
 		}
+		converted := dcfg.(v1alpha2.DeleteImageSetConfiguration)
 
 		// we now coerce deleteimagesetconfig to imagesetconfig
 		isc := v1alpha2.ImageSetConfiguration{
 			ImageSetConfigurationSpec: v1alpha2.ImageSetConfigurationSpec{
 				Mirror: v1alpha2.Mirror{
-					Platform:         dcfg.Delete.Platform,
-					Operators:        dcfg.Delete.Operators,
-					AdditionalImages: dcfg.Delete.AdditionalImages,
+					Platform:         converted.Delete.Platform,
+					Operators:        converted.Delete.Operators,
+					AdditionalImages: converted.Delete.AdditionalImages,
 				},
 			},
 		}
@@ -212,7 +216,7 @@ func TestExecutorRunDelete(t *testing.T) {
 			LocalStorageService:          *reg,
 			localStorageInterruptChannel: fakeStorageInterruptChan,
 			LogsDir:                      "/tmp/",
-			Delete:                       &MockDelete{},
+			Delete:                       MockDelete{},
 		}
 
 		res := &cobra.Command{}

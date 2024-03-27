@@ -38,8 +38,8 @@ type DeleteImageSetConfiguration struct {
 }
 
 // DeleteImageSetConfigurationSpec defines the global configuration for a delete imageset.
-// This is to ensure a clean differentiation between delet and mirror
-// and is designed t oavoid accidental deletion of images (when using imagesetconfig)
+// This is to ensure a clean differentiation between delete and mirror
+// and is designed to avoid accidental deletion of images (when using imagesetconfig)
 type DeleteImageSetConfigurationSpec struct {
 	// Delete defines the configuration for content types within the imageset.
 	Delete Delete `json:"delete"`
@@ -76,10 +76,6 @@ type Delete struct {
 	AdditionalImages []Image `json:"additionalImages,omitempty"`
 	// Helm define the configuration for Helm content types.
 	Helm Helm `json:"helm,omitempty"`
-	// BlockedImages define a list of images that will be blocked
-	// from the mirroring process if they exist in other content
-	// types in the configuration.
-	BlockedImages []Image `json:"blockedImages,omitempty"`
 	// Samples defines the configuration for Sample content types.
 	// This is currently not implemented.
 	Samples []SampleImages `json:"samples,omitempty"`
