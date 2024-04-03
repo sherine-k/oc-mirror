@@ -2,7 +2,6 @@ package delete
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,7 +12,6 @@ import (
 	"github.com/openshift/oc-mirror/v2/pkg/api/v1alpha3"
 	"github.com/openshift/oc-mirror/v2/pkg/archive"
 	"github.com/openshift/oc-mirror/v2/pkg/batch"
-	"github.com/openshift/oc-mirror/v2/pkg/image"
 	clog "github.com/openshift/oc-mirror/v2/pkg/log"
 	"github.com/openshift/oc-mirror/v2/pkg/manifest"
 	"github.com/openshift/oc-mirror/v2/pkg/mirror"
@@ -38,7 +36,7 @@ func (o DeleteImages) WriteDeleteMetaData(images []v1alpha3.CopyImageSchema) err
 
 	// we write the image and related blobs in yaml format to file for further processing
 	filename := filepath.Join(o.Opts.Global.WorkingDir, deleteImagesYaml)
-	discYamlFile := filepath.Join(o.Opts.Global.WorkingDir, discYaml, "/")
+	discYamlFile := filepath.Join(o.Opts.Global.WorkingDir, discYaml)
 	// used for versioning and comparing
 	if len(o.Opts.Global.DeleteID) > 0 {
 		filename = filepath.Join(o.Opts.Global.WorkingDir, strings.ReplaceAll(deleteImagesYaml, ".", "-"+o.Opts.Global.DeleteID+"."), "/")
@@ -53,24 +51,24 @@ func (o DeleteImages) WriteDeleteMetaData(images []v1alpha3.CopyImageSchema) err
 
 	// gather related blobs
 	for _, img := range images {
-		copyIS, err := buildFormatedCopyImageSchema(img.Origin, img.Destination, o.LocalStorageFQDN)
-		if err != nil {
-			o.Log.Error("%v ", err)
-		}
-		// clean up the destination url
-		// for our output yaml
-		name := strings.Split(copyIS.Destination, o.LocalStorageFQDN)
-		if len(name) > 0 {
-			copyIS.Destination = name[1][1:]
-		}
+		// copyIS, err := buildFormatedCopyImageSchema(img.Origin, img.Destination, o.LocalStorageFQDN)
+		// if err != nil {
+		// 	o.Log.Error("%v ", err)
+		// }
+		// // clean up the destination url
+		// // for our output yaml
+		// name := strings.Split(copyIS.Destination, o.LocalStorageFQDN)
+		// if len(name) > 0 {
+		// 	copyIS.Destination = name[1][1:]
+		// }
 		item := v1alpha3.DeleteItem{
-			ImageName:      copyIS.Origin,
-			ImageReference: copyIS.Destination,
+			ImageName:      img.Origin,
+			ImageReference: img.Destination,
 		}
 		if err != nil {
 			o.Log.Error("%v ", err)
 		}
-		i, err := o.Blobs.GatherBlobs(context.Background(), img.Destination)
+		i, err := o.Blobs.GatherBlobs(context.Background(), img.Source)
 		if err != nil {
 			o.Log.Error("%v image : %s", err, i)
 		}
@@ -90,7 +88,7 @@ func (o DeleteImages) WriteDeleteMetaData(images []v1alpha3.CopyImageSchema) err
 			return blobs[i] < blobs[j]
 		})
 		item.RelatedBlobs = blobs
-		items_map[copyIS.Destination] = item
+		items_map[img.Destination] = item
 	}
 
 	var items []v1alpha3.DeleteItem
@@ -172,11 +170,11 @@ func (o DeleteImages) DeleteRegistryImages(images v1alpha3.DeleteImageList) erro
 
 	for _, img := range images.Items {
 		// prefix the destination registry
-		updated := strings.Join([]string{o.Opts.Global.DeleteDestination, img.ImageReference}, "/")
+		// updated := strings.Join([]string{o.Opts.Global.DeleteDestination, img.ImageReference}, "/")
 		cis := v1alpha3.CopyImageSchema{
 			Source:      "delete-yaml",
 			Origin:      img.ImageReference,
-			Destination: updated,
+			Destination: img.ImageReference,
 		}
 		o.Log.Debug("deleting images %v", cis.Destination)
 		updatedImages = append(updatedImages, cis)
@@ -216,116 +214,4 @@ func (o DeleteImages) ReadDeleteMetaData() (v1alpha3.DeleteImageList, error) {
 		return list, err
 	}
 	return list, nil
-}
-
-// CollectReleaseImages
-func (o DeleteImages) CollectReleaseImages(releaseFolder string) ([]v1alpha3.CopyImageSchema, error) {
-	var rs v1alpha3.ReleaseSchema
-	releaseJson := filepath.Join(releaseFolder, releaseManifests, imageReferences)
-	data, err := os.ReadFile(releaseJson)
-	if err != nil {
-		return []v1alpha3.CopyImageSchema{}, err
-	}
-	err = json.Unmarshal(data, &rs)
-	if err != nil {
-		return []v1alpha3.CopyImageSchema{}, err
-	}
-
-	// collect all release images and add them to CopyImageSchema collection
-	var allImages []v1alpha3.CopyImageSchema
-	for _, img := range rs.Spec.Tags {
-		// replace the destination registry with our local registry
-		copyIS, err := buildFormatedCopyImageSchema(img.Name, img.From.Name, o.LocalStorageFQDN)
-		if err != nil {
-			return []v1alpha3.CopyImageSchema{}, err
-		}
-		allImages = append(allImages, copyIS)
-	}
-	return allImages, nil
-}
-
-// CollectOperatorImages
-func (o DeleteImages) CollectOperatorImages() ([]v1alpha3.CopyImageSchema, error) {
-	var allImages []v1alpha3.CopyImageSchema
-	for _, op := range o.Config.Mirror.Operators {
-		imageIndexDir := filepath.Base(op.Catalog)
-		cacheDir := strings.Join([]string{o.Opts.Global.WorkingDir, operatorImageExtractDir, strings.ReplaceAll(imageIndexDir, ":", "/")}, "/")
-		// we dont know the subfolder name so lets get it
-		dir, err := os.ReadDir(cacheDir)
-		if err != nil {
-			return nil, err
-		}
-		if len(dir) > 0 {
-			// if there is more than one dir there could be a problem
-			// for now we select the first one
-			o.Log.Debug("label (directory) %s", dir[0].Name())
-			operatorCatalog, err := o.Manifest.GetCatalog(filepath.Join(cacheDir, dir[0].Name()))
-			if err != nil {
-				return []v1alpha3.CopyImageSchema{}, err
-			}
-			ri, err := o.Manifest.GetRelatedImagesFromCatalog(operatorCatalog, op)
-			if err != nil {
-				return []v1alpha3.CopyImageSchema{}, err
-			}
-			// collect all operator images and add them to CopyImageSchema collection
-			for _, v := range ri {
-				for _, i := range v {
-					// replace the destination registry with our local registry
-					copyIS, err := buildFormatedCopyImageSchema(i.Name, i.Image, o.LocalStorageFQDN)
-					if err != nil {
-						o.Log.Error(deleteImagesErrMsg, err)
-					}
-					allImages = append(allImages, copyIS)
-				}
-			}
-		} else {
-			return nil, fmt.Errorf("no (label) directory found in %s", cacheDir)
-		}
-	}
-	return allImages, nil
-}
-
-// CollectAdditionalImages
-func (o DeleteImages) CollectAdditionalImages() ([]v1alpha3.CopyImageSchema, error) {
-	var allImages []v1alpha3.CopyImageSchema
-	for _, ai := range o.Config.Mirror.AdditionalImages {
-		// replace the destination registry with our local registry
-		is, err := buildFormatedCopyImageSchema(ai.Name, ai.Name, o.LocalStorageFQDN)
-		if err != nil {
-			o.Log.Error(deleteImagesErrMsg, err)
-		}
-		allImages = append(allImages, is)
-	}
-	if o.Config.Mirror.Platform.Graph {
-		graphImage := v1alpha3.CopyImageSchema{
-			Source:      "",
-			Origin:      "local/graph-image",
-			Destination: dockerProtocol + strings.Join([]string{o.LocalStorageFQDN, "openshift/graph-image:latest"}, "/"),
-		}
-		allImages = append(allImages, graphImage)
-	}
-	return allImages, nil
-}
-
-// buildFormatedCopyImageSchema - simple private utility to build the CopyImageSchema data
-func buildFormatedCopyImageSchema(name, img, localStorageFQDN string) (v1alpha3.CopyImageSchema, error) {
-	var dest string
-	imgSpec, err := image.ParseRef(img)
-	if err != nil {
-		return v1alpha3.CopyImageSchema{}, err
-	}
-	if imgSpec.IsImageByDigest() {
-		dest = dockerProtocol + strings.Join([]string{localStorageFQDN, imgSpec.PathComponent + "@sha256:" + imgSpec.Digest}, "/")
-	} else {
-		dest = dockerProtocol + strings.Join([]string{localStorageFQDN, imgSpec.PathComponent + ":" + imgSpec.Tag}, "/")
-	}
-	if len(name) == 0 {
-		name = imgSpec.Name
-	}
-	is := v1alpha3.CopyImageSchema{
-		Source:      imgSpec.Name,
-		Destination: dest,
-		Origin:      name,
-	}
-	return is, nil
 }

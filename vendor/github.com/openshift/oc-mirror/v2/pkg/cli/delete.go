@@ -11,8 +11,8 @@ import (
 	_ "github.com/distribution/distribution/v3/registry/storage/driver/filesystem"
 	"github.com/google/uuid"
 
+	"github.com/openshift/oc-mirror/v2/pkg/additional"
 	"github.com/openshift/oc-mirror/v2/pkg/api/v1alpha2"
-	"github.com/openshift/oc-mirror/v2/pkg/api/v1alpha3"
 	"github.com/openshift/oc-mirror/v2/pkg/archive"
 	"github.com/openshift/oc-mirror/v2/pkg/batch"
 	"github.com/openshift/oc-mirror/v2/pkg/config"
@@ -20,6 +20,7 @@ import (
 	clog "github.com/openshift/oc-mirror/v2/pkg/log"
 	"github.com/openshift/oc-mirror/v2/pkg/manifest"
 	"github.com/openshift/oc-mirror/v2/pkg/mirror"
+	"github.com/openshift/oc-mirror/v2/pkg/operator"
 	"github.com/openshift/oc-mirror/v2/pkg/release"
 	"github.com/spf13/cobra"
 )
@@ -70,7 +71,7 @@ func NewDeleteCommand(log clog.PluggableLoggerInterface) *cobra.Command {
 				log.Error("%v ", err)
 				os.Exit(1)
 			}
-			err = ex.CompleteDelete()
+			err = ex.CompleteDelete(args)
 			if err != nil {
 				log.Error("%v ", err)
 				os.Exit(1)
@@ -147,7 +148,7 @@ func (o ExecutorSchema) ValidateDelete() error {
 }
 
 // CompleteDelete - cobra complete
-func (o *ExecutorSchema) CompleteDelete() error {
+func (o *ExecutorSchema) CompleteDelete(args []string) error {
 
 	if o.Opts.Global.DeleteGenerate {
 		o.Log.Debug("delete imagesetconfig file %s ", o.Opts.Global.ConfigPath)
@@ -204,6 +205,7 @@ func (o *ExecutorSchema) CompleteDelete() error {
 	o.Log.Info("executing %s ", o.Opts.Function)
 
 	if o.Opts.Global.DeleteGenerate {
+		o.Opts.Destination = args[0]
 		absPath, err := filepath.Abs(o.Opts.Global.WorkingDir + deleteDir)
 		if err != nil {
 			o.Log.Error("absolute path %v", err)
@@ -227,12 +229,17 @@ func (o *ExecutorSchema) CompleteDelete() error {
 	if err != nil {
 		return err
 	}
+	// fake a diskToMirrorMode
+	o.Opts.Mode = mirror.DiskToMirror
 
 	client, _ := release.NewOCPClient(uuid.New())
 	signature := release.NewSignatureClient(o.Log, o.Config, *o.Opts)
 	cn := release.NewCincinnati(o.Log, &o.Config, *o.Opts, client, false, signature)
 	o.Release = release.New(o.Log, o.LogsDir, o.Config, *o.Opts, o.Mirror, o.Manifest, cn, o.LocalStorageFQDN, o.ImageBuilder)
 	o.Batch = batch.New(o.Log, o.LogsDir, o.Mirror, o.Manifest)
+	o.Operator = operator.New(o.Log, o.LogsDir, o.Config, *o.Opts, o.Mirror, o.Manifest, o.LocalStorageFQDN)
+	o.AdditionalImages = additional.New(o.Log, o.Config, *o.Opts, o.Mirror, o.Manifest, o.LocalStorageFQDN)
+
 	// instantiate delete module
 	bg := archive.NewImageBlobGatherer(o.Opts)
 	o.Delete = delete.New(o.Log, *o.Opts, o.Batch, bg, o.Config, o.Manifest, o.LocalStorageDisk, o.LocalStorageFQDN)
@@ -251,29 +258,17 @@ func (o *ExecutorSchema) RunDelete(cmd *cobra.Command) error {
 		go startLocalRegistry(&o.LocalStorageService, o.localStorageInterruptChannel)
 
 		// lets get the release images from local disk
-		_, releaseFolder, err := o.Release.IdentifyReleases()
-		if err != nil {
-			o.Log.Error(deleteErrMsg, err)
-		}
-
-		// collect release images from local file system
-		var allImages []v1alpha3.CopyImageSchema
-		for _, i := range releaseFolder {
-			allImages, err = o.Delete.CollectReleaseImages(i)
-			if err != nil {
-				o.Log.Error(deleteErrMsg, err)
-			}
-		}
+		allImages, err := o.Release.ReleaseImageCollector(cmd.Context())
 
 		// collect operator images
-		oi, err := o.Delete.CollectOperatorImages()
+		oi, err := o.Operator.OperatorImageCollector(cmd.Context())
 		if err != nil {
 			o.Log.Error(" %v", err)
 		}
 		allImages = append(allImages, oi...)
 
 		// collect additional images
-		ai, err := o.Delete.CollectAdditionalImages()
+		ai, err := o.AdditionalImages.AdditionalImagesCollector(cmd.Context())
 		if err != nil {
 			o.Log.Error(deleteErrMsg, err)
 		}

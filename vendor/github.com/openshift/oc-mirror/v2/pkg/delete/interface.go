@@ -9,7 +9,7 @@ type DeleteInterface interface {
 	ReadDeleteMetaData() (v1alpha3.DeleteImageList, error)
 	DeleteCacheBlobs(images v1alpha3.DeleteImageList) error
 	DeleteRegistryImages(images v1alpha3.DeleteImageList) error
-	CollectReleaseImages(releaseFolder string) ([]v1alpha3.CopyImageSchema, error)
-	CollectOperatorImages() ([]v1alpha3.CopyImageSchema, error)
-	CollectAdditionalImages() ([]v1alpha3.CopyImageSchema, error)
+	// CollectReleaseImages(releaseFolder string) ([]v1alpha3.CopyImageSchema, error)
+	// CollectOperatorImages() ([]v1alpha3.CopyImageSchema, error)
+	// CollectAdditionalImages() ([]v1alpha3.CopyImageSchema, error)
 }
