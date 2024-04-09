@@ -489,6 +489,8 @@ func getGraphData(ctx context.Context, c Client) (graph graph, err error) {
 		proxy, err := transport.Proxy(req)
 		if err == nil && proxy != nil {
 			klog.Infof("Using proxy %s to request updates from %s", proxy.Host, uri)
+		} else {
+			klog.Warningf("problem encountered while setting proxy to %v: %v", proxy, err)
 		}
 	}
 
