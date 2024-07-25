@@ -25,4 +25,5 @@ const (
 	clusterResourcesDir           string = "cluster-resources"
 	maxParallelLayerDownloads     uint   = 10
 	limitOverallParallelDownloads uint   = 200
+	graphBaseImage                       = "registry.redhat.io/ubi9/ubi:latest"
 )

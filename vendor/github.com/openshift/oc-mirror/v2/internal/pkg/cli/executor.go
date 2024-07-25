@@ -419,7 +419,7 @@ func (o *ExecutorSchema) Complete(args []string) error {
 
 	client, _ := release.NewOCPClient(uuid.New())
 
-	o.ImageBuilder = imagebuilder.NewBuilder(o.Log, *o.Opts)
+	o.ImageBuilder = imagebuilder.NewBuilder(o.Log, *o.Opts, graphBaseImage)
 
 	signature := release.NewSignatureClient(o.Log, o.Config, *o.Opts)
 	cn := release.NewCincinnati(o.Log, &o.Config, *o.Opts, client, false, signature)

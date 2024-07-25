@@ -969,6 +969,7 @@ github.com/openshift/oc-mirror/v2/internal/pkg/delete
 github.com/openshift/oc-mirror/v2/internal/pkg/history
 github.com/openshift/oc-mirror/v2/internal/pkg/image
 github.com/openshift/oc-mirror/v2/internal/pkg/imagebuilder
+github.com/openshift/oc-mirror/v2/internal/pkg/imagebuilder/transport
 github.com/openshift/oc-mirror/v2/internal/pkg/log
 github.com/openshift/oc-mirror/v2/internal/pkg/manifest
 github.com/openshift/oc-mirror/v2/internal/pkg/mirror

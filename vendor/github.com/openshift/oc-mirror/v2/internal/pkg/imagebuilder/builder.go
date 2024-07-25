@@ -15,7 +15,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/containers/image/v5/pkg/cli/environment"
 	cimagetypesv5 "github.com/containers/image/v5/types"
+
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
@@ -26,6 +28,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
 	"github.com/google/go-containerregistry/pkg/v1/types"
+	"github.com/openshift/oc-mirror/v2/internal/pkg/imagebuilder/transport"
 	"github.com/openshift/oc-mirror/v2/internal/pkg/log"
 	"github.com/openshift/oc-mirror/v2/internal/pkg/mirror"
 )
@@ -35,6 +38,7 @@ type ImageBuilder struct {
 	NameOpts   []name.Option
 	RemoteOpts []remote.Option
 	Logger     log.PluggableLoggerInterface
+	ImageRef   string
 }
 
 // ErrInvalidReference is returned the target reference is a digest.
@@ -47,7 +51,7 @@ func (e ErrInvalidReference) Error() string {
 }
 
 // NewImageBuilder creates a new instance of an ImageBuilder.
-func NewBuilder(logger log.PluggableLoggerInterface, opts mirror.CopyOptions) ImageBuilderInterface {
+func NewBuilder(logger log.PluggableLoggerInterface, opts mirror.CopyOptions, imgRef string) ImageBuilderInterface {
 	// preparing name options for pulling the ubi9 image:
 	// - no need to set defaultRegistry because we are using a fully qualified image name
 	nameOptions := []name.Option{
@@ -58,20 +62,48 @@ func NewBuilder(logger log.PluggableLoggerInterface, opts mirror.CopyOptions) Im
 		remote.WithContext(context.TODO()),
 		// doesn't seem possible to use registries.conf here.
 	}
-	ctx, err := opts.DestImage.NewSystemContext()
-	if err == nil && ctx != nil && ctx.DockerInsecureSkipTLSVerify == cimagetypesv5.OptionalBoolTrue {
+	srcCtx, err := opts.SrcImage.NewSystemContext()
+	if err != nil {
+		srcCtx = &cimagetypesv5.SystemContext{
+			RegistriesDirPath:           "",
+			ArchitectureChoice:          "",
+			OSChoice:                    "",
+			VariantChoice:               "",
+			BigFilesTemporaryDir:        "", //*globalArgs.cache + "/tmp",
+			DockerInsecureSkipTLSVerify: cimagetypesv5.OptionalBoolFalse,
+		}
+	}
+	err = environment.UpdateRegistriesConf(srcCtx)
+	if err != nil {
+		logger.Warn("unable to load registries.conf from environment variables: %v", err)
+
+	}
+	mirrors := transport.FindMirrors(srcCtx, imgRef, logger)
+
+	dstCtx, err := opts.DestImage.NewSystemContext()
+	if err == nil && dstCtx != nil && dstCtx.DockerInsecureSkipTLSVerify == cimagetypesv5.OptionalBoolTrue {
 		nameOptions = append(nameOptions, name.Insecure)
 		// create our own roundTripper to pass insecure=true
 		insecureRoundTripper := createInsecureRoundTripper()
-		remoteOptions = append(remoteOptions, remote.WithTransport(insecureRoundTripper))
+		if len(mirrors) > 0 {
+			insecureRoundTripperWithMirrors := transport.NewWithMirrors(insecureRoundTripper, mirrors, logger)
+			remoteOptions = append(remoteOptions, remote.WithTransport(insecureRoundTripperWithMirrors))
+		} else {
+			remoteOptions = append(remoteOptions, remote.WithTransport(insecureRoundTripper))
+		}
 	} else {
-		remoteOptions = append(remoteOptions, remote.WithTransport(remote.DefaultTransport))
+		if len(mirrors) > 0 {
+			remoteOptions = append(remoteOptions, remote.WithTransport(transport.NewWithMirrors(remote.DefaultTransport, mirrors, logger)))
+		} else {
+			remoteOptions = append(remoteOptions, remote.WithTransport(remote.DefaultTransport))
+		}
 	}
 
 	return &ImageBuilder{
 		NameOpts:   nameOptions,
 		RemoteOpts: remoteOptions,
 		Logger:     logger,
+		ImageRef:   imgRef,
 	}
 }
 

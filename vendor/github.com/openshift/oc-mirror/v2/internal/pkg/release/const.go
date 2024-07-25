@@ -1,7 +1,7 @@
 package release
 
 const (
-	graphBaseImage              = "registry.access.redhat.com/ubi9/ubi:latest"
+	graphBaseImage              = "registry.redhat.io/ubi9/ubi:latest"
 	graphURL                    = "https://api.openshift.com/api/upgrades_info/graph-data"
 	graphArchive                = "cincinnati-graph-data.tar"
 	graphPreparationDir         = "graph-preparation"

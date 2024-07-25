@@ -21,6 +21,7 @@ const (
 	graphArchive       = "cincinnati-graph-data.tar"
 	graphStaging       = common.TestFolder + "graph-staging/"
 	graphPreparation   = common.TestFolder + "graph-preparation/"
+	graphBaseImage     = "registry.access.redhat.com/ubi9/ubi:latest"
 )
 
 func TestImageBuilder(t *testing.T) {
@@ -58,10 +59,10 @@ func TestImageBuilder(t *testing.T) {
 
 	t.Run("Testing NewImageBuilder : should pass", func(t *testing.T) {
 
-		_ = NewBuilder(log, opts)
+		_ = NewBuilder(log, opts, graphBaseImage)
 		_ = srcFlags.Set("src-tls-verify", "true")
 		_ = destFlags.Set("dest-tls-verify", "true")
-		_ = NewBuilder(log, opts)
+		_ = NewBuilder(log, opts, graphBaseImage)
 
 		e := ErrInvalidReference{image: "broken"}
 		log.Error("testing error %v", e.Error())
@@ -80,7 +81,7 @@ func TestImageBuilder(t *testing.T) {
 
 		_ = srcFlags.Set("src-tls-verify", "false")
 		_ = destFlags.Set("dest-tls-verify", "false")
-		ex := NewBuilder(log, opts)
+		ex := NewBuilder(log, opts, graphBaseImage)
 		ctx := context.Background()
 
 		// expect errors from LayerFromGzipByteArray
@@ -177,7 +178,7 @@ func TestProcessImageIndex(t *testing.T) {
 			Mode:                mirror.DiskToMirror,
 		}
 
-		ex := NewBuilder(log, opts)
+		ex := NewBuilder(log, opts, graphBaseImage)
 		ctx := context.Background()
 
 		body, err := os.ReadFile(common.TestFolder + "graph-assets/graph-data.tar.gz")
