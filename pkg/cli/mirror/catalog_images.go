@@ -10,7 +10,6 @@ import (
 	"io/fs"
 	"math/rand"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"runtime"
@@ -27,8 +26,14 @@ import (
 	"github.com/operator-framework/operator-registry/pkg/containertools"
 	"github.com/operator-framework/operator-registry/pkg/image/containerdregistry"
 	"github.com/otiai10/copy"
+	"github.com/sirupsen/logrus"
 	"k8s.io/klog/v2"
 
+	"github.com/containers/buildah"
+	"github.com/containers/buildah/define"
+	"github.com/containers/buildah/imagebuildah"
+	"github.com/containers/image/v5/transports/alltransports"
+	"github.com/containers/storage"
 	"github.com/openshift/oc-mirror/pkg/api/v1alpha2"
 	"github.com/openshift/oc-mirror/pkg/config"
 	"github.com/openshift/oc-mirror/pkg/image"
@@ -401,25 +406,61 @@ func (o *MirrorOptions) processCatalogRefs(ctx context.Context, catalogsByImage 
 			// 	return fmt.Errorf("error running podman build: %v", err)
 			// }
 
-			// run podman build
-			cmd := exec.Command("podman", "build", "-t", refExact, "-f", "Containerfile", ".") // TODO --platform linux/amd64,linux/arm64  --manifest <image name>
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-			cmd.Dir, err = filepath.Abs(artifactDir)
+			// prepare buildah stuff
+			buildStoreOptions, err := storage.DefaultStoreOptions()
+			if err != nil {
+				return fmt.Errorf("unable to create default store options for building catalog %v", err)
+			}
+
+			buildStore, err := storage.GetStore(buildStoreOptions)
+			if err != nil {
+				return fmt.Errorf("unable to setup buildstore for building catalog image %v", err)
+
+			}
+			defer buildStore.Shutdown(false)
+			options := define.BuildOptions{}
+			options.AllPlatforms = true
+			options.ContextDirectory, err = filepath.Abs(artifactDir)
+			options.Output = refExact
 			if err != nil {
 				return fmt.Errorf("error finding absolute path of %s: %v", artifactDir, err)
 			}
-			if err := cmd.Run(); err != nil {
-				return fmt.Errorf("error running podman build: %v", err)
+			id, ref, err := imagebuildah.BuildDockerfiles(ctx, buildStore, options, []string{containerfilePath}...)
+			if err == nil && options.Manifest != "" {
+				logrus.Debugf("manifest list id = %q, ref = %q", id, ref.String())
 			}
 
-			// run podman push
-			cmd = exec.Command("podman", "push", refExact, "--tls-verify=false") // TODO : replace with podman manifest push refExact
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-			if err := cmd.Run(); err != nil {
-				return fmt.Errorf("error running podman push: %v", err)
+			pushOptions := buildah.PushOptions{
+				SystemContext: newSystemContext(o.DestSkipTLS, ""),
+				Store:         buildStore,
 			}
+			dest, err := alltransports.ParseImageName("docker://" + refExact)
+			if err != nil {
+				return fmt.Errorf("error parsing destination reference %s: %v", refExact, err)
+			}
+			_, _, err = buildah.Push(ctx, refExact, dest, pushOptions)
+			if err != nil {
+				return fmt.Errorf("error pushing catalog image: %v", err)
+			}
+			// // run podman build
+			// cmd := exec.Command("podman", "build", "-t", refExact, "-f", "Containerfile", ".") // TODO --platform linux/amd64,linux/arm64  --manifest <image name>
+			// cmd.Stdout = os.Stdout
+			// cmd.Stderr = os.Stderr
+			// cmd.Dir, err = filepath.Abs(artifactDir)
+			// if err != nil {
+			// 	return fmt.Errorf("error finding absolute path of %s: %v", artifactDir, err)
+			// }
+			// if err := cmd.Run(); err != nil {
+			// 	return fmt.Errorf("error running podman build: %v", err)
+			// }
+
+			// // run podman push
+			// cmd = exec.Command("podman", "push", refExact, "--tls-verify=false") // TODO : replace with podman manifest push refExact
+			// cmd.Stdout = os.Stdout
+			// cmd.Stderr = os.Stderr
+			// if err := cmd.Run(); err != nil {
+			// 	return fmt.Errorf("error running podman push: %v", err)
+			// }
 			return nil
 
 			// opmCmdPath := ""

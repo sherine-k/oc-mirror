@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path"
@@ -24,9 +25,11 @@ import (
 	"github.com/containers/storage/pkg/archive"
 	"github.com/containers/storage/pkg/chrootarchive"
 	"github.com/containers/storage/pkg/directory"
+	"github.com/containers/storage/pkg/fileutils"
 	"github.com/containers/storage/pkg/fsutils"
 	"github.com/containers/storage/pkg/idmap"
 	"github.com/containers/storage/pkg/idtools"
+	"github.com/containers/storage/pkg/lockfile"
 	"github.com/containers/storage/pkg/mount"
 	"github.com/containers/storage/pkg/parsers"
 	"github.com/containers/storage/pkg/system"
@@ -82,6 +85,11 @@ const (
 	lowerFile  = "lower"
 	maxDepth   = 500
 
+	stagingLockFile = "staging.lock"
+
+	tocArtifact             = "toc"
+	fsVerityDigestsArtifact = "fs-verity-digests"
+
 	// idLength represents the number of random characters
 	// which can be used to create the unique link identifier
 	// for every layer. If this value is too long then the
@@ -103,6 +111,7 @@ type overlayOptions struct {
 	mountOptions      string
 	ignoreChownErrors bool
 	forceMask         *os.FileMode
+	useComposefs      bool
 }
 
 // Driver contains information about the home directory and the list of active mounts that are created using this driver.
@@ -111,8 +120,6 @@ type Driver struct {
 	home             string
 	runhome          string
 	imageStore       string
-	uidMaps          []idtools.IDMap
-	gidMaps          []idtools.IDMap
 	ctr              *graphdriver.RefCounter
 	quotaCtl         *quota.Control
 	options          overlayOptions
@@ -120,6 +127,9 @@ type Driver struct {
 	supportsDType    bool
 	supportsVolatile *bool
 	usingMetacopy    bool
+	usingComposefs   bool
+
+	stagingDirsLocks map[string]*lockfile.LockFile
 
 	supportsIDMappedMounts *bool
 }
@@ -291,7 +301,7 @@ func isNetworkFileSystem(fsMagic graphdriver.FsMagic) bool {
 	// a bunch of network file systems...
 	case graphdriver.FsMagicNfsFs, graphdriver.FsMagicSmbFs, graphdriver.FsMagicAcfs,
 		graphdriver.FsMagicAfs, graphdriver.FsMagicCephFs, graphdriver.FsMagicCIFS,
-		graphdriver.FsMagicFHGFSFs, graphdriver.FsMagicGPFS, graphdriver.FsMagicIBRIX,
+		graphdriver.FsMagicGPFS, graphdriver.FsMagicIBRIX,
 		graphdriver.FsMagicKAFS, graphdriver.FsMagicLUSTRE, graphdriver.FsMagicNCP,
 		graphdriver.FsMagicNFSD, graphdriver.FsMagicOCFS2, graphdriver.FsMagicPANFS,
 		graphdriver.FsMagicPRLFS, graphdriver.FsMagicSMB2, graphdriver.FsMagicSNFS,
@@ -305,16 +315,6 @@ func isNetworkFileSystem(fsMagic graphdriver.FsMagic) bool {
 // If overlay filesystem is not supported on the host, a wrapped graphdriver.ErrNotSupported is returned as error.
 // If an overlay filesystem is not supported over an existing filesystem then a wrapped graphdriver.ErrIncompatibleFS is returned.
 func Init(home string, options graphdriver.Options) (graphdriver.Driver, error) {
-	// If custom --imagestore is selected never
-	// ditch the original graphRoot, instead add it as
-	// additionalImageStore so its images can still be
-	// read and used.
-	if options.ImageStore != "" {
-		graphRootAsAdditionalStore := fmt.Sprintf("AdditionalImageStore=%s", options.ImageStore)
-		options.DriverOptions = append(options.DriverOptions, graphRootAsAdditionalStore)
-		// complete base name with driver name included
-		options.ImageStore = filepath.Join(options.ImageStore, "overlay")
-	}
 	opts, err := parseOptions(options.DriverOptions)
 	if err != nil {
 		return nil, err
@@ -331,13 +331,9 @@ func Init(home string, options graphdriver.Options) (graphdriver.Driver, error) 
 	backingFs = fsName
 
 	runhome := filepath.Join(options.RunRoot, filepath.Base(home))
-	rootUID, rootGID, err := idtools.GetRootUIDGID(options.UIDMaps, options.GIDMaps)
-	if err != nil {
-		return nil, err
-	}
 
 	// Create the driver home dir
-	if err := idtools.MkdirAllAs(path.Join(home, linkDir), 0o755, 0, 0); err != nil {
+	if err := os.MkdirAll(path.Join(home, linkDir), 0o755); err != nil {
 		return nil, err
 	}
 
@@ -347,7 +343,7 @@ func Init(home string, options graphdriver.Options) (graphdriver.Driver, error) 
 		}
 	}
 
-	if err := idtools.MkdirAllAs(runhome, 0o700, rootUID, rootGID); err != nil {
+	if err := os.MkdirAll(runhome, 0o700); err != nil {
 		return nil, err
 	}
 
@@ -372,9 +368,6 @@ func Init(home string, options graphdriver.Options) (graphdriver.Driver, error) 
 			return nil, err
 		}
 	} else {
-		if opts.forceMask != nil {
-			return nil, errors.New("'force_mask' is supported only with 'mount_program'")
-		}
 		// check if they are running over btrfs, aufs, overlay, or ecryptfs
 		switch fsMagic {
 		case graphdriver.FsMagicAufs, graphdriver.FsMagicOverlay, graphdriver.FsMagicEcryptfs:
@@ -382,6 +375,22 @@ func Init(home string, options graphdriver.Options) (graphdriver.Driver, error) 
 		}
 		if unshare.IsRootless() && isNetworkFileSystem(fsMagic) {
 			return nil, fmt.Errorf("a network file system with user namespaces is not supported.  Please use a mount_program: %w", graphdriver.ErrIncompatibleFS)
+		}
+	}
+
+	if opts.useComposefs {
+		if unshare.IsRootless() {
+			return nil, fmt.Errorf("composefs is not supported in user namespaces")
+		}
+		supportsDataOnly, err := supportsDataOnlyLayersCached(home, runhome)
+		if err != nil {
+			return nil, err
+		}
+		if !supportsDataOnly {
+			return nil, fmt.Errorf("composefs is not supported on this kernel: %w", graphdriver.ErrIncompatibleFS)
+		}
+		if _, err := getComposeFsHelper(); err != nil {
+			return nil, fmt.Errorf("composefs helper program not found: %w", err)
 		}
 	}
 
@@ -440,13 +449,13 @@ func Init(home string, options graphdriver.Options) (graphdriver.Driver, error) 
 		home:             home,
 		imageStore:       options.ImageStore,
 		runhome:          runhome,
-		uidMaps:          options.UIDMaps,
-		gidMaps:          options.GIDMaps,
 		ctr:              graphdriver.NewRefCounter(graphdriver.NewFsChecker(fileSystemType)),
 		supportsDType:    supportsDType,
 		usingMetacopy:    usingMetacopy,
 		supportsVolatile: supportsVolatile,
+		usingComposefs:   opts.useComposefs,
 		options:          *opts,
+		stagingDirsLocks: make(map[string]*lockfile.LockFile),
 	}
 
 	d.naiveDiff = graphdriver.NewNaiveDiffDriver(d, graphdriver.NewNaiveLayerIDMapUpdater(d))
@@ -553,10 +562,16 @@ func parseOptions(options []string) (*overlayOptions, error) {
 					withReference: withReference,
 				})
 			}
+		case "use_composefs":
+			logrus.Debugf("overlay: use_composefs=%s", val)
+			o.useComposefs, err = strconv.ParseBool(val)
+			if err != nil {
+				return nil, err
+			}
 		case "mount_program":
 			logrus.Debugf("overlay: mount_program=%s", val)
 			if val != "" {
-				_, err := os.Stat(val)
+				err := fileutils.Exists(val)
 				if err != nil {
 					return nil, fmt.Errorf("overlay: can't stat program %q: %w", val, err)
 				}
@@ -658,7 +673,7 @@ func SupportsNativeOverlay(home, runhome string) (bool, error) {
 	}
 
 	for _, dir := range []string{home, runhome} {
-		if _, err := os.Stat(dir); err != nil {
+		if err := fileutils.Exists(dir); err != nil {
 			_ = idtools.MkdirAllAs(dir, 0o700, 0, 0)
 		}
 	}
@@ -673,11 +688,7 @@ func SupportsNativeOverlay(home, runhome string) (bool, error) {
 }
 
 func supportsOverlay(home string, homeMagic graphdriver.FsMagic, rootUID, rootGID int) (supportsDType bool, err error) {
-	// We can try to modprobe overlay first
-
 	selinuxLabelTest := selinux.PrivContainerMountLabel()
-
-	exec.Command("modprobe", "overlay").Run()
 
 	logLevel := logrus.ErrorLevel
 	if unshare.IsRootless() {
@@ -780,6 +791,10 @@ func supportsOverlay(home string, homeMagic graphdriver.FsMagic, rootUID, rootGI
 }
 
 func (d *Driver) useNaiveDiff() bool {
+	if d.usingComposefs {
+		return true
+	}
+
 	useNaiveDiffLock.Do(func() {
 		if d.options.mountProgram != "" {
 			useNaiveDiffOnly = true
@@ -802,7 +817,9 @@ func (d *Driver) useNaiveDiff() bool {
 			logrus.Info(nativeDiffCacheText)
 			useNaiveDiffOnly = true
 		}
-		cachedFeatureRecord(d.runhome, feature, !useNaiveDiffOnly, nativeDiffCacheText)
+		if err := cachedFeatureRecord(d.runhome, feature, !useNaiveDiffOnly, nativeDiffCacheText); err != nil {
+			logrus.Warnf("Recording overlay native-diff support status: %v", err)
+		}
 	})
 	return useNaiveDiffOnly
 }
@@ -814,33 +831,32 @@ func (d *Driver) String() string {
 // Status returns current driver information in a two dimensional string array.
 // Output contains "Backing Filesystem" used in this implementation.
 func (d *Driver) Status() [][2]string {
+	supportsVolatile, err := d.getSupportsVolatile()
+	if err != nil {
+		supportsVolatile = false
+	}
 	return [][2]string{
 		{"Backing Filesystem", backingFs},
 		{"Supports d_type", strconv.FormatBool(d.supportsDType)},
 		{"Native Overlay Diff", strconv.FormatBool(!d.useNaiveDiff())},
 		{"Using metacopy", strconv.FormatBool(d.usingMetacopy)},
+		{"Supports shifting", strconv.FormatBool(d.SupportsShifting())},
+		{"Supports volatile", strconv.FormatBool(supportsVolatile)},
 	}
 }
 
 // Metadata returns meta data about the overlay driver such as
 // LowerDir, UpperDir, WorkDir and MergeDir used to store data.
 func (d *Driver) Metadata(id string) (map[string]string, error) {
-	dir, imagestore, _ := d.dir2(id)
-	if _, err := os.Stat(dir); err != nil {
+	dir, _, inAdditionalStore := d.dir2(id, false)
+	if err := fileutils.Exists(dir); err != nil {
 		return nil, err
-	}
-	workDirBase := dir
-	if imagestore != "" {
-		if _, err := os.Stat(dir); err != nil {
-			return nil, err
-		}
-		workDirBase = imagestore
 	}
 
 	metadata := map[string]string{
-		"WorkDir":   path.Join(workDirBase, "work"),
-		"MergedDir": path.Join(workDirBase, "merged"),
-		"UpperDir":  path.Join(workDirBase, "diff"),
+		"WorkDir":   path.Join(dir, "work"),
+		"MergedDir": d.getMergedDir(id, dir, inAdditionalStore),
+		"UpperDir":  path.Join(dir, "diff"),
 	}
 
 	lowerDirs, err := d.getLowerDirs(id)
@@ -854,20 +870,54 @@ func (d *Driver) Metadata(id string) (map[string]string, error) {
 	return metadata, nil
 }
 
-// Cleanup any state created by overlay which should be cleaned when daemon
-// is being shutdown. For now, we just have to unmount the bind mounted
-// we had created.
+// Cleanup any state created by overlay which should be cleaned when
+// the storage is being shutdown.  The only state created by the driver
+// is the bind mount on the home directory.
 func (d *Driver) Cleanup() error {
-	_ = os.RemoveAll(d.getStagingDir())
+	anyPresent := d.pruneStagingDirectories()
+	if anyPresent {
+		return nil
+	}
 	return mount.Unmount(d.home)
 }
 
+// pruneStagingDirectories cleans up any staging directory that was leaked.
+// It returns whether any staging directory is still present.
+func (d *Driver) pruneStagingDirectories() bool {
+	for _, lock := range d.stagingDirsLocks {
+		lock.Unlock()
+	}
+	d.stagingDirsLocks = make(map[string]*lockfile.LockFile)
+
+	anyPresent := false
+
+	homeStagingDir := filepath.Join(d.home, stagingDir)
+	dirs, err := os.ReadDir(homeStagingDir)
+	if err == nil {
+		for _, dir := range dirs {
+			stagingDirToRemove := filepath.Join(homeStagingDir, dir.Name())
+			lock, err := lockfile.GetLockFile(filepath.Join(stagingDirToRemove, stagingLockFile))
+			if err != nil {
+				anyPresent = true
+				continue
+			}
+			if err := lock.TryLock(); err != nil {
+				anyPresent = true
+				continue
+			}
+			_ = os.RemoveAll(stagingDirToRemove)
+			lock.Unlock()
+		}
+	}
+	return anyPresent
+}
+
 // LookupAdditionalLayer looks up additional layer store by the specified
-// digest and ref and returns an object representing that layer.
+// TOC digest and ref and returns an object representing that layer.
 // This API is experimental and can be changed without bumping the major version number.
 // TODO: to remove the comment once it's no longer experimental.
-func (d *Driver) LookupAdditionalLayer(dgst digest.Digest, ref string) (graphdriver.AdditionalLayer, error) {
-	l, err := d.getAdditionalLayerPath(dgst, ref)
+func (d *Driver) LookupAdditionalLayer(tocDigest digest.Digest, ref string) (graphdriver.AdditionalLayer, error) {
+	l, err := d.getAdditionalLayerPath(tocDigest, ref)
 	if err != nil {
 		return nil, err
 	}
@@ -921,6 +971,10 @@ func (d *Driver) CreateReadWrite(id, parent string, opts *graphdriver.CreateOpts
 		}
 	}
 
+	if d.options.forceMask != nil && d.options.mountProgram == "" {
+		return fmt.Errorf("overlay: force_mask option for writeable layers is only supported with a mount_program")
+	}
+
 	if _, ok := opts.StorageOpt["size"]; !ok {
 		if opts.StorageOpt == nil {
 			opts.StorageOpt = map[string]string{}
@@ -954,11 +1008,13 @@ func (d *Driver) Create(id, parent string, opts *graphdriver.CreateOpts) (retErr
 	return d.create(id, parent, opts, true)
 }
 
-func (d *Driver) create(id, parent string, opts *graphdriver.CreateOpts, disableQuota bool) (retErr error) {
-	dir, imageStore, _ := d.dir2(id)
+func (d *Driver) create(id, parent string, opts *graphdriver.CreateOpts, readOnly bool) (retErr error) {
+	dir, homedir, _ := d.dir2(id, readOnly)
 
-	uidMaps := d.uidMaps
-	gidMaps := d.gidMaps
+	disableQuota := readOnly
+
+	var uidMaps []idtools.IDMap
+	var gidMaps []idtools.IDMap
 
 	if opts != nil && opts.IDMappings != nil {
 		uidMaps = opts.IDMappings.UIDs()
@@ -966,7 +1022,7 @@ func (d *Driver) create(id, parent string, opts *graphdriver.CreateOpts, disable
 	}
 
 	// Make the link directory if it does not exist
-	if err := idtools.MkdirAllAs(path.Join(d.home, linkDir), 0o755, 0, 0); err != nil {
+	if err := idtools.MkdirAllAs(path.Join(homedir, linkDir), 0o755, 0, 0); err != nil {
 		return err
 	}
 
@@ -983,27 +1039,26 @@ func (d *Driver) create(id, parent string, opts *graphdriver.CreateOpts, disable
 	if err := idtools.MkdirAllAndChownNew(path.Dir(dir), 0o755, idPair); err != nil {
 		return err
 	}
-	workDirBase := dir
-	if imageStore != "" {
-		workDirBase = imageStore
-		if err := idtools.MkdirAllAndChownNew(path.Dir(imageStore), 0o755, idPair); err != nil {
-			return err
-		}
-	}
+
+	st := idtools.Stat{IDs: idPair, Mode: defaultPerms}
+
 	if parent != "" {
-		parentBase, parentImageStore, _ := d.dir2(parent)
-		if parentImageStore != "" {
-			parentBase = parentImageStore
+		parentBase := d.dir(parent)
+		parentDiff := filepath.Join(parentBase, "diff")
+		if xSt, err := idtools.GetContainersOverrideXattr(parentDiff); err == nil {
+			st = xSt
+		} else {
+			systemSt, err := system.Stat(parentDiff)
+			if err != nil {
+				return err
+			}
+			st.IDs.UID = int(systemSt.UID())
+			st.IDs.GID = int(systemSt.GID())
+			st.Mode = os.FileMode(systemSt.Mode())
 		}
-		st, err := system.Stat(filepath.Join(parentBase, "diff"))
-		if err != nil {
-			return err
-		}
-		rootUID = int(st.UID())
-		rootGID = int(st.GID())
 	}
 
-	if _, err := system.Lstat(dir); err == nil {
+	if err := fileutils.Lexists(dir); err == nil {
 		logrus.Warnf("Trying to create a layer %#v while directory %q already exists; removing it first", id, dir)
 		// Don’t just os.RemoveAll(dir) here; d.Remove also removes the link in linkDir,
 		// so that we can’t end up with two symlinks in linkDir pointing to the same layer.
@@ -1015,22 +1070,12 @@ func (d *Driver) create(id, parent string, opts *graphdriver.CreateOpts, disable
 	if err := idtools.MkdirAllAndChownNew(dir, 0o700, idPair); err != nil {
 		return err
 	}
-	if imageStore != "" {
-		if err := idtools.MkdirAllAndChownNew(imageStore, 0o700, idPair); err != nil {
-			return err
-		}
-	}
 
 	defer func() {
 		// Clean up on failure
 		if retErr != nil {
 			if err2 := os.RemoveAll(dir); err2 != nil {
 				logrus.Errorf("While recovering from a failure creating a layer, error deleting %#v: %v", dir, err2)
-			}
-			if imageStore != "" {
-				if err2 := os.RemoveAll(workDirBase); err2 != nil {
-					logrus.Errorf("While recovering from a failure creating a layer, error deleting %#v: %v", workDirBase, err2)
-				}
 			}
 		}
 	}()
@@ -1054,42 +1099,29 @@ func (d *Driver) create(id, parent string, opts *graphdriver.CreateOpts, disable
 		if err := d.quotaCtl.SetQuota(dir, quota); err != nil {
 			return err
 		}
-		if imageStore != "" {
-			if err := d.quotaCtl.SetQuota(imageStore, quota); err != nil {
-				return err
-			}
-		}
 	}
 
-	perms := defaultPerms
+	forcedSt := st
 	if d.options.forceMask != nil {
-		perms = *d.options.forceMask
+		forcedSt.IDs = idPair
+		forcedSt.Mode = *d.options.forceMask
 	}
 
-	if parent != "" {
-		parentDir, parentImageStore, _ := d.dir2(parent)
-		base := parentDir
-		if parentImageStore != "" {
-			base = parentImageStore
-		}
-		st, err := system.Stat(filepath.Join(base, "diff"))
-		if err != nil {
+	diff := path.Join(dir, "diff")
+	if err := idtools.MkdirAs(diff, forcedSt.Mode, forcedSt.IDs.UID, forcedSt.IDs.GID); err != nil {
+		return err
+	}
+
+	if d.options.forceMask != nil {
+		if err := idtools.SetContainersOverrideXattr(diff, st); err != nil {
 			return err
 		}
-		perms = os.FileMode(st.Mode())
-	}
-
-	if err := idtools.MkdirAs(path.Join(workDirBase, "diff"), perms, rootUID, rootGID); err != nil {
-		return err
 	}
 
 	lid := generateID(idLength)
 
 	linkBase := path.Join("..", id, "diff")
-	if imageStore != "" {
-		linkBase = path.Join(imageStore, "diff")
-	}
-	if err := os.Symlink(linkBase, path.Join(d.home, linkDir, lid)); err != nil {
+	if err := os.Symlink(linkBase, path.Join(homedir, linkDir, lid)); err != nil {
 		return err
 	}
 
@@ -1098,16 +1130,16 @@ func (d *Driver) create(id, parent string, opts *graphdriver.CreateOpts, disable
 		return err
 	}
 
-	if err := idtools.MkdirAs(path.Join(workDirBase, "work"), 0o700, rootUID, rootGID); err != nil {
+	if err := idtools.MkdirAs(path.Join(dir, "work"), 0o700, forcedSt.IDs.UID, forcedSt.IDs.GID); err != nil {
 		return err
 	}
-	if err := idtools.MkdirAs(path.Join(dir, "merged"), 0o700, rootUID, rootGID); err != nil {
+	if err := idtools.MkdirAs(path.Join(dir, "merged"), 0o700, forcedSt.IDs.UID, forcedSt.IDs.GID); err != nil {
 		return err
 	}
 
 	// if no parent directory, create a dummy lower directory and skip writing a "lowers" file
 	if parent == "" {
-		return idtools.MkdirAs(path.Join(dir, "empty"), 0o700, rootUID, rootGID)
+		return idtools.MkdirAs(path.Join(dir, "empty"), 0o700, forcedSt.IDs.UID, forcedSt.IDs.GID)
 	}
 
 	lower, err := d.getLower(parent)
@@ -1153,7 +1185,7 @@ func (d *Driver) getLower(parent string) (string, error) {
 	parentDir := d.dir(parent)
 
 	// Ensure parent exists
-	if _, err := os.Lstat(parentDir); err != nil {
+	if err := fileutils.Lexists(parentDir); err != nil {
 		return "", err
 	}
 
@@ -1183,26 +1215,39 @@ func (d *Driver) getLower(parent string) (string, error) {
 }
 
 func (d *Driver) dir(id string) string {
-	p, _, _ := d.dir2(id)
+	p, _, _ := d.dir2(id, false)
 	return p
 }
 
-func (d *Driver) dir2(id string) (string, string, bool) {
-	newpath := path.Join(d.home, id)
-	imageStore := ""
+func (d *Driver) getAllImageStores() []string {
+	additionalImageStores := d.AdditionalImageStores()
 	if d.imageStore != "" {
-		imageStore = path.Join(d.imageStore, id)
+		additionalImageStores = append([]string{d.imageStore}, additionalImageStores...)
 	}
-	if _, err := os.Stat(newpath); err != nil {
-		for _, p := range d.AdditionalImageStores() {
+	return additionalImageStores
+}
+
+func (d *Driver) dir2(id string, useImageStore bool) (string, string, bool) {
+	var homedir string
+
+	if useImageStore && d.imageStore != "" {
+		homedir = path.Join(d.imageStore, d.name)
+	} else {
+		homedir = d.home
+	}
+
+	newpath := path.Join(homedir, id)
+
+	if err := fileutils.Exists(newpath); err != nil {
+		for _, p := range d.getAllImageStores() {
 			l := path.Join(p, d.name, id)
-			_, err = os.Stat(l)
+			err = fileutils.Exists(l)
 			if err == nil {
-				return l, imageStore, true
+				return l, homedir, true
 			}
 		}
 	}
-	return newpath, imageStore, false
+	return newpath, homedir, false
 }
 
 func (d *Driver) getLowerDirs(id string) ([]string, error) {
@@ -1238,12 +1283,6 @@ func (d *Driver) getLowerDirs(id string) ([]string, error) {
 }
 
 func (d *Driver) optsAppendMappings(opts string, uidMaps, gidMaps []idtools.IDMap) string {
-	if uidMaps == nil {
-		uidMaps = d.uidMaps
-	}
-	if gidMaps == nil {
-		gidMaps = d.gidMaps
-	}
 	if uidMaps != nil {
 		var uids, gids bytes.Buffer
 		if len(uidMaps) == 1 && uidMaps[0].Size == 1 {
@@ -1336,7 +1375,7 @@ func (d *Driver) recreateSymlinks() error {
 			linkPath := path.Join(d.home, linkDir, strings.Trim(string(data), "\n"))
 			// Check if the symlink exists, and if it doesn't, create it again with the
 			// name we got from the "link" file
-			_, err = os.Lstat(linkPath)
+			err = fileutils.Lexists(linkPath)
 			if err != nil && os.IsNotExist(err) {
 				if err := os.Symlink(path.Join("..", dir.Name(), "diff"), linkPath); err != nil {
 					errs = multierror.Append(errs, err)
@@ -1412,14 +1451,11 @@ func (d *Driver) Get(id string, options graphdriver.MountOpts) (string, error) {
 }
 
 func (d *Driver) get(id string, disableShifting bool, options graphdriver.MountOpts) (_ string, retErr error) {
-	dir, imageStore, inAdditionalStore := d.dir2(id)
-	if _, err := os.Stat(dir); err != nil {
+	dir, _, inAdditionalStore := d.dir2(id, false)
+	if err := fileutils.Exists(dir); err != nil {
 		return "", err
 	}
-	workDirBase := dir
-	if imageStore != "" {
-		workDirBase = imageStore
-	}
+
 	readWrite := !inAdditionalStore
 
 	if !d.SupportsShifting() || options.DisableShifting {
@@ -1431,8 +1467,13 @@ func (d *Driver) get(id string, disableShifting bool, options graphdriver.MountO
 		logLevel = logrus.DebugLevel
 	}
 	optsList := options.Options
+
+	needsIDMapping := !disableShifting && len(options.UidMaps) > 0 && len(options.GidMaps) > 0 && d.options.mountProgram == ""
+
 	if len(optsList) == 0 {
-		optsList = strings.Split(d.options.mountOptions, ",")
+		if d.options.mountOptions != "" {
+			optsList = strings.Split(d.options.mountOptions, ",")
+		}
 	} else {
 		// If metacopy=on is present in d.options.mountOptions it must be present in the mount
 		// options otherwise the kernel refuses to follow the metacopy xattr.
@@ -1492,23 +1533,85 @@ func (d *Driver) get(id string, disableShifting bool, options graphdriver.MountO
 	for err == nil {
 		absLowers = append(absLowers, filepath.Join(dir, nameWithSuffix("diff", diffN)))
 		diffN++
-		st, err = os.Stat(filepath.Join(dir, nameWithSuffix("diff", diffN)))
-		if err == nil && !permsKnown {
-			perms = os.FileMode(st.Mode())
-			permsKnown = true
+		err = fileutils.Exists(filepath.Join(dir, nameWithSuffix("diff", diffN)))
+	}
+
+	idmappedMountProcessPid := -1
+	if needsIDMapping {
+		pid, cleanupFunc, err := idmap.CreateUsernsProcess(options.UidMaps, options.GidMaps)
+		if err != nil {
+			return "", err
 		}
+		idmappedMountProcessPid = int(pid)
+		defer cleanupFunc()
+	}
+
+	skipIDMappingLayers := make(map[string]string)
+
+	composefsMounts := []string{}
+	defer func() {
+		for _, m := range composefsMounts {
+			defer func(m string) {
+				if err := unix.Unmount(m, unix.MNT_DETACH); err != nil {
+					logrus.Warnf("Unmount %q: %v", m, err)
+				}
+			}(m)
+		}
+	}()
+
+	composeFsLayers := []string{}
+	composeFsLayersDir := filepath.Join(dir, "composefs-layers")
+	maybeAddComposefsMount := func(lowerID string, i int, readWrite bool) (string, error) {
+		composefsBlob := d.getComposefsData(lowerID)
+		if err := fileutils.Exists(composefsBlob); err != nil {
+			if os.IsNotExist(err) {
+				return "", nil
+			}
+			return "", err
+		}
+		logrus.Debugf("overlay: using composefs blob %s for lower %s", composefsBlob, lowerID)
+
+		if readWrite && i == 0 {
+			return "", fmt.Errorf("cannot mount a composefs layer as writeable")
+		}
+
+		dest := filepath.Join(composeFsLayersDir, fmt.Sprintf("%d", i))
+		if err := os.MkdirAll(dest, 0o700); err != nil {
+			return "", err
+		}
+
+		if err := mountComposefsBlob(composefsBlob, dest); err != nil {
+			return "", err
+		}
+		composefsMounts = append(composefsMounts, dest)
+		composeFsPath, err := d.getDiffPath(lowerID)
+		if err != nil {
+			return "", err
+		}
+		composeFsLayers = append(composeFsLayers, composeFsPath)
+		skipIDMappingLayers[composeFsPath] = composeFsPath
+		return dest, nil
+	}
+
+	diffDir := path.Join(dir, "diff")
+
+	if dest, err := maybeAddComposefsMount(id, 0, readWrite); err != nil {
+		return "", err
+	} else if dest != "" {
+		diffDir = dest
 	}
 
 	// For each lower, resolve its path, and append it and any additional diffN
 	// directories to the lowers list.
-	for _, l := range splitLowers {
+	for i, l := range splitLowers {
 		if l == "" {
 			continue
 		}
+
 		lower := ""
 		newpath := path.Join(d.home, l)
 		if st, err := os.Stat(newpath); err != nil {
-			for _, p := range d.AdditionalImageStores() {
+			for _, p := range d.getAllImageStores() {
 				lower = path.Join(p, d.name, l)
 				if st2, err2 := os.Stat(lower); err2 == nil {
 					if !permsKnown {
@@ -1538,33 +1641,74 @@ func (d *Driver) get(id string, disableShifting bool, options graphdriver.MountO
 			}
 			lower = newpath
 		}
+
+		linkContent, err := os.Readlink(lower)
+		if err != nil {
+			return "", err
+		}
+		lowerID := filepath.Base(filepath.Dir(linkContent))
+		composefsMount, err := maybeAddComposefsMount(lowerID, i+1, readWrite)
+		if err != nil {
+			return "", err
+		}
+		if composefsMount != "" {
+			if needsIDMapping {
+				if err := idmap.CreateIDMappedMount(composefsMount, composefsMount, idmappedMountProcessPid); err != nil {
+					return "", fmt.Errorf("create mapped mount for %q: %w", composefsMount, err)
+				}
+				skipIDMappingLayers[composefsMount] = composefsMount
+				// overlay takes a reference on the mount, so it is safe to unmount
+				// the mapped idmounts as soon as the final overlay file system is mounted.
+				defer func() {
+					if err := unix.Unmount(composefsMount, unix.MNT_DETACH); err != nil {
+						logrus.Warnf("Unmount %q: %v", composefsMount, err)
+					}
+				}()
+			}
+			absLowers = append(absLowers, composefsMount)
+			continue
+		}
+
 		absLowers = append(absLowers, lower)
 		diffN = 1
-		_, err = os.Stat(dumbJoin(lower, "..", nameWithSuffix("diff", diffN)))
+		err = fileutils.Exists(dumbJoin(lower, "..", nameWithSuffix("diff", diffN)))
 		for err == nil {
 			absLowers = append(absLowers, dumbJoin(lower, "..", nameWithSuffix("diff", diffN)))
 			diffN++
-			_, err = os.Stat(dumbJoin(lower, "..", nameWithSuffix("diff", diffN)))
+			err = fileutils.Exists(dumbJoin(lower, "..", nameWithSuffix("diff", diffN)))
 		}
 	}
 
-	if len(absLowers) == 0 {
-		absLowers = append(absLowers, path.Join(dir, "empty"))
+	if len(composeFsLayers) > 0 {
+		optsList = append(optsList, "metacopy=on", "redirect_dir=on")
 	}
+
 	// user namespace requires this to move a directory from lower to upper.
 	rootUID, rootGID, err := idtools.GetRootUIDGID(options.UidMaps, options.GidMaps)
 	if err != nil {
 		return "", err
 	}
-	diffDir := path.Join(workDirBase, "diff")
-	if err := idtools.MkdirAllAs(diffDir, perms, rootUID, rootGID); err != nil {
-		return "", err
+
+	if len(absLowers) == 0 {
+		absLowers = append(absLowers, path.Join(dir, "empty"))
 	}
 
-	mergedDir := path.Join(dir, "merged")
-	// Create the driver merged dir
-	if err := idtools.MkdirAs(mergedDir, 0o700, rootUID, rootGID); err != nil && !os.IsExist(err) {
-		return "", err
+	if err := idtools.MkdirAllAs(diffDir, perms, rootUID, rootGID); err != nil {
+		if !inAdditionalStore {
+			return "", err
+		}
+		// if it is in an additional store, do not fail if the directory already exists
+		if err2 := fileutils.Exists(diffDir); err2 != nil {
+			return "", err
+		}
+	}
+
+	mergedDir := d.getMergedDir(id, dir, inAdditionalStore)
+	// Attempt to create the merged dir only if it doesn't exist.
+	if err := fileutils.Exists(mergedDir); err != nil && os.IsNotExist(err) {
+		if err := idtools.MkdirAllAs(mergedDir, 0o700, rootUID, rootGID); err != nil && !os.IsExist(err) {
+			return "", err
+		}
 	}
 	if count := d.ctr.Increment(mergedDir); count > 1 {
 		return mergedDir, nil
@@ -1579,7 +1723,7 @@ func (d *Driver) get(id string, disableShifting bool, options graphdriver.MountO
 		}
 	}()
 
-	workdir := path.Join(workDirBase, "work")
+	workdir := path.Join(dir, "work")
 
 	if d.options.mountProgram == "" && unshare.IsRootless() {
 		optsList = append(optsList, "userxattr")
@@ -1596,38 +1740,41 @@ func (d *Driver) get(id string, disableShifting bool, options graphdriver.MountO
 		}
 	}
 
-	if !disableShifting && len(options.UidMaps) > 0 && len(options.GidMaps) > 0 && d.options.mountProgram == "" {
+	if needsIDMapping {
 		var newAbsDir []string
+		idMappedMounts := make(map[string]string)
+
 		mappedRoot := filepath.Join(d.home, id, "mapped")
 		if err := os.MkdirAll(mappedRoot, 0o700); err != nil {
 			return "", err
 		}
-
-		pid, cleanupFunc, err := idmap.CreateUsernsProcess(options.UidMaps, options.GidMaps)
-		if err != nil {
-			return "", err
-		}
-		defer cleanupFunc()
-
-		idMappedMounts := make(map[string]string)
 
 		// rewrite the lower dirs to their idmapped mount.
 		c := 0
 		for _, absLower := range absLowers {
 			mappedMountSrc := getMappedMountRoot(absLower)
 
+			if _, ok := skipIDMappingLayers[absLower]; ok {
+				newAbsDir = append(newAbsDir, absLower)
+				continue
+			}
+
 			root, found := idMappedMounts[mappedMountSrc]
 			if !found {
 				root = filepath.Join(mappedRoot, fmt.Sprintf("%d", c))
 				c++
-				if err := idmap.CreateIDMappedMount(mappedMountSrc, root, int(pid)); err != nil {
+				if err := idmap.CreateIDMappedMount(mappedMountSrc, root, idmappedMountProcessPid); err != nil {
 					return "", fmt.Errorf("create mapped mount for %q on %q: %w", mappedMountSrc, root, err)
 				}
 				idMappedMounts[mappedMountSrc] = root
 
 				// overlay takes a reference on the mount, so it is safe to unmount
 				// the mapped idmounts as soon as the final overlay file system is mounted.
-				defer unix.Unmount(root, unix.MNT_DETACH)
+				defer func() {
+					if err := unix.Unmount(root, unix.MNT_DETACH); err != nil {
+						logrus.Warnf("Unmount %q: %v", root, err)
+					}
+				}()
 			}
 
 			// relative path to the layer through the id mapped mount
@@ -1641,11 +1788,20 @@ func (d *Driver) get(id string, disableShifting bool, options graphdriver.MountO
 		absLowers = newAbsDir
 	}
 
+	lowerDirs := strings.Join(absLowers, ":")
+	if len(composeFsLayers) > 0 {
+		composeFsLayersLowerDirs := strings.Join(composeFsLayers, "::")
+		lowerDirs = lowerDirs + "::" + composeFsLayersLowerDirs
+	}
+	// absLowers is not valid anymore now as we have added composeFsLayers to it, so prevent
+	// its usage.
+	absLowers = nil //nolint:ineffassign
+
 	var opts string
 	if readWrite {
-		opts = fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s", strings.Join(absLowers, ":"), diffDir, workdir)
+		opts = fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s", lowerDirs, diffDir, workdir)
 	} else {
-		opts = fmt.Sprintf("lowerdir=%s:%s", diffDir, strings.Join(absLowers, ":"))
+		opts = fmt.Sprintf("lowerdir=%s:%s", diffDir, lowerDirs)
 	}
 	if len(optsList) > 0 {
 		opts = fmt.Sprintf("%s,%s", opts, strings.Join(optsList, ","))
@@ -1689,9 +1845,9 @@ func (d *Driver) get(id string, disableShifting bool, options graphdriver.MountO
 		if readWrite {
 			diffDir := path.Join(id, "diff")
 			workDir := path.Join(id, "work")
-			opts = fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s", strings.Join(absLowers, ":"), diffDir, workDir)
+			opts = fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s", lowerDirs, diffDir, workDir)
 		} else {
-			opts = fmt.Sprintf("lowerdir=%s:%s", diffDir, strings.Join(absLowers, ":"))
+			opts = fmt.Sprintf("lowerdir=%s:%s", diffDir, lowerDirs)
 		}
 		if len(optsList) > 0 {
 			opts = strings.Join(append([]string{opts}, optsList...), ",")
@@ -1700,7 +1856,9 @@ func (d *Driver) get(id string, disableShifting bool, options graphdriver.MountO
 		mountFunc = func(source string, target string, mType string, flags uintptr, label string) error {
 			return mountOverlayFrom(d.home, source, target, mType, flags, label)
 		}
-		mountTarget = path.Join(id, "merged")
+		if !inAdditionalStore {
+			mountTarget = path.Join(id, "merged")
+		}
 	}
 
 	// overlay has a check in place to prevent mounting the same file system twice
@@ -1719,17 +1877,30 @@ func (d *Driver) get(id string, disableShifting bool, options graphdriver.MountO
 	return mergedDir, nil
 }
 
+// getMergedDir returns the directory path that should be used as the mount point for the overlayfs.
+func (d *Driver) getMergedDir(id, dir string, inAdditionalStore bool) string {
+	// If the layer is in an additional store, the lock we might hold only a reading lock.  To prevent
+	// races with other processes, use a private directory under the main store rundir.  At this point, the
+	// current process is holding an exclusive lock on the store, and since the rundir cannot be shared for
+	// different stores, it is safe to assume the current process has exclusive access to it.
+	if inAdditionalStore {
+		return path.Join(d.runhome, id, "merged")
+	}
+	return path.Join(dir, "merged")
+}
+
 // Put unmounts the mount path created for the give id.
 func (d *Driver) Put(id string) error {
-	dir := d.dir(id)
-	if _, err := os.Stat(dir); err != nil {
+	dir, _, inAdditionalStore := d.dir2(id, false)
+	if err := fileutils.Exists(dir); err != nil {
 		return err
 	}
-	mountpoint := path.Join(dir, "merged")
+	mountpoint := d.getMergedDir(id, dir, inAdditionalStore)
+
 	if count := d.ctr.Decrement(mountpoint); count > 0 {
 		return nil
 	}
-	if _, err := os.ReadFile(path.Join(dir, lowerFile)); err != nil && !os.IsNotExist(err) {
+	if err := fileutils.Exists(path.Join(dir, lowerFile)); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 
@@ -1737,7 +1908,7 @@ func (d *Driver) Put(id string) error {
 
 	mappedRoot := filepath.Join(d.home, id, "mapped")
 	// It should not happen, but cleanup any mapped mount if it was leaked.
-	if _, err := os.Stat(mappedRoot); err == nil {
+	if err := fileutils.Exists(mappedRoot); err == nil {
 		mounts, err := os.ReadDir(mappedRoot)
 		if err == nil {
 			// Go through all of the mapped mounts.
@@ -1776,21 +1947,47 @@ func (d *Driver) Put(id string) error {
 	if !unmounted {
 		if err := unix.Unmount(mountpoint, unix.MNT_DETACH); err != nil && !os.IsNotExist(err) {
 			logrus.Debugf("Failed to unmount %s overlay: %s - %v", id, mountpoint, err)
-			return fmt.Errorf("unmounting %q: %w", mountpoint, err)
+			if !errors.Is(err, unix.EINVAL) {
+				return fmt.Errorf("unmounting %q: %w", mountpoint, err)
+			}
 		}
 	}
 
-	if err := unix.Rmdir(mountpoint); err != nil && !os.IsNotExist(err) {
-		logrus.Debugf("Failed to remove mountpoint %s overlay: %s - %v", id, mountpoint, err)
-		return fmt.Errorf("removing mount point %q: %w", mountpoint, err)
-	}
+	if inAdditionalStore {
+		// check the base name for extra safety
+		if strings.HasPrefix(mountpoint, d.runhome) && filepath.Base(mountpoint) == "merged" {
+			err := os.RemoveAll(filepath.Dir(mountpoint))
+			if err != nil {
+				logrus.Warningf("Failed to remove mountpoint %s overlay: %s: %v", id, mountpoint, err)
+			}
+		}
+	} else {
+		uid, gid := int(0), int(0)
+		fi, err := os.Stat(mountpoint)
+		if err != nil {
+			return err
+		}
+		if stat, ok := fi.Sys().(*syscall.Stat_t); ok {
+			uid, gid = int(stat.Uid), int(stat.Gid)
+		}
 
+		tmpMountpoint := path.Join(dir, "merged.1")
+		if err := idtools.MkdirAs(tmpMountpoint, 0o700, uid, gid); err != nil && !errors.Is(err, os.ErrExist) {
+			return err
+		}
+		// rename(2) can be used on an empty directory, as it is the mountpoint after umount, and it retains
+		// its atomic semantic.  In this way the "merged" directory is never removed.
+		if err := unix.Rename(tmpMountpoint, mountpoint); err != nil {
+			logrus.Debugf("Failed to replace mountpoint %s overlay: %s: %v", id, mountpoint, err)
+			return fmt.Errorf("replacing mount point %q: %w", mountpoint, err)
+		}
+	}
 	return nil
 }
 
 // Exists checks to see if the id is already mounted.
 func (d *Driver) Exists(id string) bool {
-	_, err := os.Stat(d.dir(id))
+	err := fileutils.Exists(d.dir(id))
 	return err == nil
 }
 
@@ -1852,11 +2049,27 @@ func (d *Driver) getWhiteoutFormat() archive.WhiteoutFormat {
 }
 
 type overlayFileGetter struct {
-	diffDirs []string
+	diffDirs        []string
+	composefsMounts map[string]*os.File // map from diff dir to the directory with the composefs blob mounted
 }
 
 func (g *overlayFileGetter) Get(path string) (io.ReadCloser, error) {
+	buf := make([]byte, unix.PathMax)
 	for _, d := range g.diffDirs {
+		if f, found := g.composefsMounts[d]; found {
+			// there is no *at equivalent for getxattr, but it can be emulated by opening the file under /proc/self/fd/$FD/$PATH
+			len, err := unix.Getxattr(fmt.Sprintf("/proc/self/fd/%d/%s", int(f.Fd()), path), "trusted.overlay.redirect", buf)
+			if err != nil {
+				if errors.Is(err, unix.ENODATA) {
+					continue
+				}
+				return nil, &fs.PathError{Op: "getxattr", Path: path, Err: err}
+			}
+
+			// the xattr value is the path to the file in the composefs layer diff directory
+			return os.Open(filepath.Join(d, string(buf[:len])))
+		}
+
 		f, err := os.Open(filepath.Join(d, path))
 		if err == nil {
 			return f, nil
@@ -1869,17 +2082,27 @@ func (g *overlayFileGetter) Get(path string) (io.ReadCloser, error) {
 }
 
 func (g *overlayFileGetter) Close() error {
-	return nil
+	var errs *multierror.Error
+	for _, f := range g.composefsMounts {
+		if err := f.Close(); err != nil {
+			errs = multierror.Append(errs, err)
+		}
+		if err := unix.Rmdir(f.Name()); err != nil {
+			errs = multierror.Append(errs, err)
+		}
+	}
+	return errs.ErrorOrNil()
 }
 
-func (d *Driver) getStagingDir() string {
-	return filepath.Join(d.home, stagingDir)
+func (d *Driver) getStagingDir(id string) string {
+	_, homedir, _ := d.dir2(id, d.imageStore != "")
+	return filepath.Join(homedir, stagingDir)
 }
 
 // DiffGetter returns a FileGetCloser that can read files from the directory that
 // contains files for the layer differences, either for this layer, or one of our
 // lowers if we're just a template directory. Used for direct access for tar-split.
-func (d *Driver) DiffGetter(id string) (graphdriver.FileGetCloser, error) {
+func (d *Driver) DiffGetter(id string) (_ graphdriver.FileGetCloser, Err error) {
 	p, err := d.getDiffPath(id)
 	if err != nil {
 		return nil, err
@@ -1888,20 +2111,88 @@ func (d *Driver) DiffGetter(id string) (graphdriver.FileGetCloser, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &overlayFileGetter{diffDirs: append([]string{p}, paths...)}, nil
+
+	// map from diff dir to the directory with the composefs blob mounted
+	composefsMounts := make(map[string]*os.File)
+	defer func() {
+		if Err != nil {
+			for _, f := range composefsMounts {
+				f.Close()
+				if err := unix.Rmdir(f.Name()); err != nil && !os.IsNotExist(err) {
+					logrus.Warnf("Failed to remove %s: %v", f.Name(), err)
+				}
+			}
+		}
+	}()
+	diffDirs := append([]string{p}, paths...)
+	for _, diffDir := range diffDirs {
+		// diffDir has the form $GRAPH_ROOT/overlay/$ID/diff, so grab the $ID from the parent directory
+		id := path.Base(path.Dir(diffDir))
+		composefsBlob := d.getComposefsData(id)
+		if fileutils.Exists(composefsBlob) != nil {
+			// not a composefs layer, ignore it
+			continue
+		}
+		dir, err := os.MkdirTemp(d.runhome, "composefs-mnt")
+		if err != nil {
+			return nil, err
+		}
+		if err := mountComposefsBlob(composefsBlob, dir); err != nil {
+			return nil, err
+		}
+		fd, err := os.Open(dir)
+		if err != nil {
+			return nil, err
+		}
+		composefsMounts[diffDir] = fd
+		_ = unix.Unmount(dir, unix.MNT_DETACH)
+	}
+	return &overlayFileGetter{diffDirs: diffDirs, composefsMounts: composefsMounts}, nil
 }
 
 // CleanupStagingDirectory cleanups the staging directory.
 func (d *Driver) CleanupStagingDirectory(stagingDirectory string) error {
-	return os.RemoveAll(stagingDirectory)
+	parentStagingDir := filepath.Dir(stagingDirectory)
+
+	if lock, ok := d.stagingDirsLocks[parentStagingDir]; ok {
+		delete(d.stagingDirsLocks, parentStagingDir)
+		lock.Unlock()
+	}
+
+	return os.RemoveAll(parentStagingDir)
 }
 
-// ApplyDiff applies the changes in the new layer using the specified function
-func (d *Driver) ApplyDiffWithDiffer(id, parent string, options *graphdriver.ApplyDiffOpts, differ graphdriver.Differ) (output graphdriver.DriverWithDifferOutput, err error) {
+func supportsDataOnlyLayersCached(home, runhome string) (bool, error) {
+	feature := "dataonly-layers"
+	overlayCacheResult, overlayCacheText, err := cachedFeatureCheck(runhome, feature)
+	if err == nil {
+		if overlayCacheResult {
+			logrus.Debugf("Cached value indicated that data-only layers for overlay are supported")
+			return true, nil
+		}
+		logrus.Debugf("Cached value indicated that data-only layers for overlay are not supported")
+		return false, errors.New(overlayCacheText)
+	}
+	supportsDataOnly, err := supportsDataOnlyLayers(home)
+	if err2 := cachedFeatureRecord(runhome, feature, supportsDataOnly, ""); err2 != nil {
+		return false, fmt.Errorf("recording overlay data-only layers support status: %w", err2)
+	}
+	return supportsDataOnly, err
+}
+
+// ApplyDiffWithDiffer applies the changes in the new layer using the specified function
+func (d *Driver) ApplyDiffWithDiffer(id, parent string, options *graphdriver.ApplyDiffWithDifferOpts, differ graphdriver.Differ) (output graphdriver.DriverWithDifferOutput, errRet error) {
 	var idMappings *idtools.IDMappings
+	var forceMask *os.FileMode
+
 	if options != nil {
 		idMappings = options.Mappings
+		forceMask = options.ForceMask
 	}
+	if d.options.forceMask != nil {
+		forceMask = d.options.forceMask
+	}
+
 	if idMappings == nil {
 		idMappings = &idtools.IDMappings{}
 	}
@@ -1909,15 +2200,36 @@ func (d *Driver) ApplyDiffWithDiffer(id, parent string, options *graphdriver.App
 	var applyDir string
 
 	if id == "" {
-		err := os.MkdirAll(d.getStagingDir(), 0o700)
+		stagingDir := d.getStagingDir(id)
+		err := os.MkdirAll(stagingDir, 0o700)
 		if err != nil && !os.IsExist(err) {
 			return graphdriver.DriverWithDifferOutput{}, err
 		}
-		applyDir, err = os.MkdirTemp(d.getStagingDir(), "")
+		layerDir, err := os.MkdirTemp(stagingDir, "")
 		if err != nil {
 			return graphdriver.DriverWithDifferOutput{}, err
 		}
+		perms := defaultPerms
+		if forceMask != nil {
+			perms = *forceMask
+		}
+		applyDir = filepath.Join(layerDir, "dir")
+		if err := os.Mkdir(applyDir, perms); err != nil {
+			return graphdriver.DriverWithDifferOutput{}, err
+		}
 
+		lock, err := lockfile.GetLockFile(filepath.Join(layerDir, stagingLockFile))
+		if err != nil {
+			return graphdriver.DriverWithDifferOutput{}, err
+		}
+		defer func() {
+			if errRet != nil {
+				delete(d.stagingDirsLocks, layerDir)
+				lock.Unlock()
+			}
+		}()
+		d.stagingDirsLocks[layerDir] = lock
+		lock.Lock()
 	} else {
 		var err error
 		applyDir, err = d.getDiffPath(id)
@@ -1928,34 +2240,75 @@ func (d *Driver) ApplyDiffWithDiffer(id, parent string, options *graphdriver.App
 
 	logrus.Debugf("Applying differ in %s", applyDir)
 
+	differOptions := graphdriver.DifferOptions{
+		Format: graphdriver.DifferOutputFormatDir,
+	}
+	if d.usingComposefs {
+		differOptions.Format = graphdriver.DifferOutputFormatFlat
+		differOptions.UseFsVerity = graphdriver.DifferFsVerityIfAvailable
+	}
 	out, err := differ.ApplyDiff(applyDir, &archive.TarOptions{
 		UIDMaps:           idMappings.UIDs(),
 		GIDMaps:           idMappings.GIDs(),
 		IgnoreChownErrors: d.options.ignoreChownErrors,
 		WhiteoutFormat:    d.getWhiteoutFormat(),
 		InUserNS:          unshare.IsRootless(),
-	})
+		ForceMask:         forceMask,
+	}, &differOptions)
+
 	out.Target = applyDir
+
 	return out, err
 }
 
 // ApplyDiffFromStagingDirectory applies the changes using the specified staging directory.
-func (d *Driver) ApplyDiffFromStagingDirectory(id, parent, stagingDirectory string, diffOutput *graphdriver.DriverWithDifferOutput, options *graphdriver.ApplyDiffOpts) error {
-	if filepath.Dir(stagingDirectory) != d.getStagingDir() {
+func (d *Driver) ApplyDiffFromStagingDirectory(id, parent string, diffOutput *graphdriver.DriverWithDifferOutput, options *graphdriver.ApplyDiffWithDifferOpts) error {
+	stagingDirectory := diffOutput.Target
+	parentStagingDir := filepath.Dir(stagingDirectory)
+
+	defer func() {
+		if lock, ok := d.stagingDirsLocks[parentStagingDir]; ok {
+			delete(d.stagingDirsLocks, parentStagingDir)
+			lock.Unlock()
+		}
+	}()
+
+	if filepath.Dir(parentStagingDir) != d.getStagingDir(id) {
 		return fmt.Errorf("%q is not a staging directory", stagingDirectory)
 	}
 
-	diff, err := d.getDiffPath(id)
+	diffPath, err := d.getDiffPath(id)
 	if err != nil {
 		return err
 	}
-	if err := os.RemoveAll(diff); err != nil && !os.IsNotExist(err) {
+
+	// If the current layer doesn't set the mode for the parent, override it with the parent layer's mode.
+	if d.options.forceMask == nil && diffOutput.RootDirMode == nil && parent != "" {
+		parentDiffPath, err := d.getDiffPath(parent)
+		if err != nil {
+			return err
+		}
+		parentSt, err := os.Stat(parentDiffPath)
+		if err != nil {
+			return err
+		}
+		if err := os.Chmod(stagingDirectory, parentSt.Mode()); err != nil {
+			return err
+		}
+	}
+
+	if d.usingComposefs {
+		toc := diffOutput.Artifacts[tocArtifact]
+		verityDigests := diffOutput.Artifacts[fsVerityDigestsArtifact].(map[string]string)
+		if err := generateComposeFsBlob(verityDigests, toc, d.getComposefsData(id)); err != nil {
+			return err
+		}
+	}
+	if err := os.RemoveAll(diffPath); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 
-	diffOutput.UncompressedDigest = diffOutput.TOCDigest
-
-	return os.Rename(stagingDirectory, diff)
+	return os.Rename(stagingDirectory, diffPath)
 }
 
 // DifferTarget gets the location where files are stored for the layer.
@@ -2001,13 +2354,14 @@ func (d *Driver) ApplyDiff(id, parent string, options graphdriver.ApplyDiffOpts)
 	return directory.Size(applyDir)
 }
 
+func (d *Driver) getComposefsData(id string) string {
+	dir := d.dir(id)
+	return path.Join(dir, "composefs-data")
+}
+
 func (d *Driver) getDiffPath(id string) (string, error) {
-	dir, imagestore, _ := d.dir2(id)
-	base := dir
-	if imagestore != "" {
-		base = imagestore
-	}
-	return redirectDiffIfAdditionalLayer(path.Join(base, "diff"))
+	dir := d.dir(id)
+	return redirectDiffIfAdditionalLayer(path.Join(dir, "diff"))
 }
 
 func (d *Driver) getLowerDiffPaths(id string) ([]string, error) {
@@ -2028,7 +2382,7 @@ func (d *Driver) getLowerDiffPaths(id string) ([]string, error) {
 // and its parent and returns the size in bytes of the changes
 // relative to its base filesystem directory.
 func (d *Driver) DiffSize(id string, idMappings *idtools.IDMappings, parent string, parentMappings *idtools.IDMappings, mountLabel string) (size int64, err error) {
-	if d.options.mountProgram == "" && (d.useNaiveDiff() || !d.isParent(id, parent)) {
+	if !d.isParent(id, parent) {
 		return d.naiveDiff.DiffSize(id, idMappings, parent, parentMappings, mountLabel)
 	}
 
@@ -2079,14 +2433,18 @@ func (d *Driver) Changes(id string, idMappings *idtools.IDMappings, parent strin
 	// layers.
 	diffPath, err := d.getDiffPath(id)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to get diff path: %w", err)
 	}
 	layers, err := d.getLowerDiffPaths(id)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to get lower diff path: %w", err)
 	}
 
-	return archive.OverlayChanges(layers, diffPath)
+	c, err := archive.OverlayChanges(layers, diffPath)
+	if err != nil {
+		return nil, fmt.Errorf("computing changes: %w", err)
+	}
+	return c, nil
 }
 
 // AdditionalImageStores returns additional image stores supported by the driver
@@ -2098,12 +2456,8 @@ func (d *Driver) AdditionalImageStores() []string {
 // by toContainer to those specified by toHost.
 func (d *Driver) UpdateLayerIDMap(id string, toContainer, toHost *idtools.IDMappings, mountLabel string) error {
 	var err error
-	dir, imagestore, _ := d.dir2(id)
-	base := dir
-	if imagestore != "" {
-		base = imagestore
-	}
-	diffDir := filepath.Join(base, "diff")
+	dir := d.dir(id)
+	diffDir := filepath.Join(dir, "diff")
 
 	rootUID, rootGID := 0, 0
 	if toHost != nil {
@@ -2146,7 +2500,7 @@ func (d *Driver) UpdateLayerIDMap(id string, toContainer, toHost *idtools.IDMapp
 	}
 	for err == nil {
 		i++
-		_, err = os.Stat(nameWithSuffix(diffDir, i))
+		err = fileutils.Exists(nameWithSuffix(diffDir, i))
 	}
 
 	for i > 0 {
@@ -2217,29 +2571,35 @@ func nameWithSuffix(name string, number int) string {
 	return fmt.Sprintf("%s%d", name, number)
 }
 
-func (d *Driver) getAdditionalLayerPath(dgst digest.Digest, ref string) (string, error) {
+func validateOneAdditionalLayerPath(target string) error {
+	for _, p := range []string{
+		filepath.Join(target, "diff"),
+		filepath.Join(target, "info"),
+		filepath.Join(target, "blob"),
+	} {
+		if err := fileutils.Exists(p); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (d *Driver) getAdditionalLayerPath(tocDigest digest.Digest, ref string) (string, error) {
 	refElem := base64.StdEncoding.EncodeToString([]byte(ref))
 	for _, ls := range d.options.layerStores {
 		ref := ""
 		if ls.withReference {
 			ref = refElem
 		}
-		target := path.Join(ls.path, ref, dgst.String())
-		// Check if all necessary files exist
-		for _, p := range []string{
-			filepath.Join(target, "diff"),
-			filepath.Join(target, "info"),
-			filepath.Join(target, "blob"),
-		} {
-			if _, err := os.Stat(p); err != nil {
-				wrapped := fmt.Errorf("failed to stat additional layer %q: %w", p, err)
-				return "", fmt.Errorf("%v: %w", wrapped, graphdriver.ErrLayerUnknown)
-			}
+		target := path.Join(ls.path, ref, tocDigest.String())
+		err := validateOneAdditionalLayerPath(target)
+		if err == nil {
+			return target, nil
 		}
-		return target, nil
+		logrus.Debugf("additional Layer Store %v failed to stat additional layer: %v", ls, err)
 	}
 
-	return "", fmt.Errorf("additional layer (%q, %q) not found: %w", dgst, ref, graphdriver.ErrLayerUnknown)
+	return "", fmt.Errorf("additional layer (%q, %q) not found: %w", tocDigest, ref, graphdriver.ErrLayerUnknown)
 }
 
 func (d *Driver) releaseAdditionalLayerByID(id string) {
