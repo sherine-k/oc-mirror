@@ -2,6 +2,7 @@ package mirror
 
 import (
 	"archive/tar"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"text/template"
 
 	"github.com/google/go-containerregistry/pkg/crane"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
@@ -64,6 +66,11 @@ func (o *MirrorOptions) unpackCatalog(dstDir string, filesInArchive map[string]s
 	return found, nil
 }
 
+type imgInfo struct {
+	path   string
+	imgRef string
+}
+
 /*
 rebuildOrCopyCatalogs will modify an OCI catalog in <some path>/src/catalogs/<repoPath>/layout with
 the index.json files found in <some path>/src/catalogs/<repoPath>/index/index.json
@@ -91,7 +98,7 @@ func (o *MirrorOptions) rebuildOrCopyCatalogs(ctx context.Context, dstDir string
 	}
 
 	dstDir = filepath.Clean(dstDir)
-	catalogsByImage := map[image.TypedImage]string{}
+	catalogsByImage := map[image.TypedImage]imgInfo{}
 	if o.RebuildCatalogs {
 		if err := filepath.Walk(dstDir, func(fpath string, info fs.FileInfo, err error) error {
 
@@ -154,7 +161,7 @@ func (o *MirrorOptions) rebuildOrCopyCatalogs(ctx context.Context, dstDir string
 				// Tags are needed here since the digest will be recalculated.
 				ctlgRef.Ref.ID = ""
 
-				catalogsByImage[ctlgRef] = slashPath
+				catalogsByImage[ctlgRef] = imgInfo{path: slashPath, imgRef: img}
 
 				// Add to mapping for ICSP generation
 				refs.Add(sourceRef, ctlgRef.TypedImageReference, v1alpha2.TypeOperatorCatalog)
@@ -307,11 +314,12 @@ processCatalogRefs uses the image builder to update a given image using the data
 
 • error: non-nil if error occurs, nil otherwise
 */
-func (o *MirrorOptions) processCatalogRefs(ctx context.Context, catalogsByImage map[image.TypedImage]string) error {
-	for ctlgRef, artifactDir := range catalogsByImage {
+func (o *MirrorOptions) processCatalogRefs(ctx context.Context, catalogsByImage map[image.TypedImage]imgInfo) error {
+	for ctlgRef, imgData := range catalogsByImage {
 		// Always build the catalog image with the new declarative config catalog
 		// using the original catalog as the base image
 		var layoutPath layout.Path
+		artifactDir := imgData.path
 		refExact := ctlgRef.Ref.Exact()
 
 		var destInsecure bool
@@ -351,37 +359,99 @@ func (o *MirrorOptions) processCatalogRefs(ctx context.Context, catalogsByImage 
 		layersToDelete = append(layersToDelete, deletedConfigLayer)
 
 		if withCacheRegeneration {
+			// use templating to complete the Containerfile
+			containerfileTemplate := `
+			FROM {{ .RefExact }}
+			USER root
+			RUN rm -fr /configs
+			COPY ./index /configs
+			USER 1001
+			RUN rm -fr /tmp/cache/*
+			RUN /bin/opm serve /configs --cache-only --cache-dir=/tmp/cache
+			`
+			containerfileContent := bytes.NewBufferString("")
+			tmpl, err := template.New("Containerfile").Parse(containerfileTemplate)
+			if err != nil {
+				return fmt.Errorf("error parsing Dockerfile template: %v", err)
+			}
+			err = tmpl.Execute(containerfileContent, map[string]interface{}{
+				"RefExact": imgData.imgRef,
+			})
+			if err != nil {
+				return fmt.Errorf("error executing Containerfile template: %v", err)
+			}
 
-			opmCmdPath := ""
-			if opmBinary := os.Getenv("OPM_BINARY"); opmBinary != "" {
-				opmCmdPath = opmBinary
-			} else {
-				opmCmdPath = filepath.Join(artifactDir, config.OpmBinDir, "opm")
-			}
-			_, err = os.Stat(opmCmdPath)
+			// write the Containerfile content to a file
+			containerfilePath := filepath.Join(artifactDir, "Containerfile")
+			err = os.WriteFile(containerfilePath, containerfileContent.Bytes(), 0644)
 			if err != nil {
-				return fmt.Errorf("cannot find opm in the extracted catalog %v for %s on %s: %v", ctlgRef, runtime.GOOS, runtime.GOARCH, err)
+				return fmt.Errorf("error writing Dockerfile: %v", err)
 			}
 
-			absConfigPath, err := filepath.Abs(filepath.Join(artifactDir, config.IndexDir))
+			// discover all variants (os/arch) for the catalog
+			// run podman create manifest
+			// cmd := exec.Command("podman", "manifest", "create", refExact)
+			// cmd.Stdout = os.Stdout
+			// cmd.Stderr = os.Stderr
+			// cmd.Dir, err = filepath.Abs(artifactDir)
+			// if err != nil {
+			// 	return fmt.Errorf("error finding absolute path of %s: %v", artifactDir, err)
+			// }
+			// if err := cmd.Run(); err != nil {
+			// 	return fmt.Errorf("error running podman build: %v", err)
+			// }
+
+			// run podman build
+			cmd := exec.Command("podman", "build", "-t", refExact, "-f", "Containerfile", ".") // TODO --platform linux/amd64,linux/arm64  --manifest <image name>
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			cmd.Dir, err = filepath.Abs(artifactDir)
 			if err != nil {
-				return fmt.Errorf("error getting absolute path for catalog's index %v: %v", filepath.Join(artifactDir, config.IndexDir), err)
+				return fmt.Errorf("error finding absolute path of %s: %v", artifactDir, err)
 			}
-			absCachePath, err := filepath.Abs(filepath.Join(artifactDir, config.TmpDir))
-			if err != nil {
-				return fmt.Errorf("error getting absolute path for catalog's cache %v: %v", filepath.Join(artifactDir, config.TmpDir), err)
-			}
-			cmd := exec.Command(opmCmdPath, "serve", absConfigPath, "--cache-dir", absCachePath, "--cache-only")
 			if err := cmd.Run(); err != nil {
-				return fmt.Errorf("error regenerating the cache for %v: %v", ctlgRef, err)
+				return fmt.Errorf("error running podman build: %v", err)
 			}
-			// Fix OCPBUGS-17546:
-			// Add the cache under /cache in a new layer (instead of white-out /tmp/cache, which resulted in crashLoopBackoff only on some clusters)
-			cacheLayerToAdd, err := builder.LayerFromPathWithUidGid("/cache", filepath.Join(artifactDir, config.TmpDir), cacheFolderUID, cacheFolderGID)
-			if err != nil {
-				return fmt.Errorf("error creating add layer: %v", err)
+
+			// run podman push
+			cmd = exec.Command("podman", "push", refExact, "--tls-verify=false") // TODO : replace with podman manifest push refExact
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			if err := cmd.Run(); err != nil {
+				return fmt.Errorf("error running podman push: %v", err)
 			}
-			layersToAdd = append(layersToAdd, cacheLayerToAdd)
+			return nil
+
+			// opmCmdPath := ""
+			// if opmBinary := os.Getenv("OPM_BINARY"); opmBinary != "" {
+			// 	opmCmdPath = opmBinary
+			// } else {
+			// 	opmCmdPath = filepath.Join(artifactDir, config.OpmBinDir, "opm")
+			// }
+			// _, err = os.Stat(opmCmdPath)
+			// if err != nil {
+			// 	return fmt.Errorf("cannot find opm in the extracted catalog %v for %s on %s: %v", ctlgRef, runtime.GOOS, runtime.GOARCH, err)
+			// }
+
+			// absConfigPath, err := filepath.Abs(filepath.Join(artifactDir, config.IndexDir))
+			// if err != nil {
+			// 	return fmt.Errorf("error getting absolute path for catalog's index %v: %v", filepath.Join(artifactDir, config.IndexDir), err)
+			// }
+			// absCachePath, err := filepath.Abs(filepath.Join(artifactDir, config.TmpDir))
+			// if err != nil {
+			// 	return fmt.Errorf("error getting absolute path for catalog's cache %v: %v", filepath.Join(artifactDir, config.TmpDir), err)
+			// }
+			// cmd := exec.Command(opmCmdPath, "serve", absConfigPath, "--cache-dir", absCachePath, "--cache-only")
+			// if err := cmd.Run(); err != nil {
+			// 	return fmt.Errorf("error regenerating the cache for %v: %v", ctlgRef, err)
+			// }
+			// // Fix OCPBUGS-17546:
+			// // Add the cache under /cache in a new layer (instead of white-out /tmp/cache, which resulted in crashLoopBackoff only on some clusters)
+			// cacheLayerToAdd, err := builder.LayerFromPathWithUidGid("/cache", filepath.Join(artifactDir, config.TmpDir), cacheFolderUID, cacheFolderGID)
+			// if err != nil {
+			// 	return fmt.Errorf("error creating add layer: %v", err)
+			// }
+			// layersToAdd = append(layersToAdd, cacheLayerToAdd)
 		}
 
 		// Deleted layers must be added first in the slice
