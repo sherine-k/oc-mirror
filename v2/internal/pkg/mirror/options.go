@@ -280,10 +280,15 @@ func RetryFlags() (pflag.FlagSet, *retry.Options) {
 }
 
 // getPolicyContext returns a *signature.PolicyContext based on opts.
-func (opts *GlobalOptions) GetPolicyContext() (*signature.PolicyContext, error) {
+func (opts *GlobalOptions) GetPolicyContext(mode Mode) (*signature.PolicyContext, error) {
 	var policy *signature.Policy // This could be cached across calls in opts.
 	var err error
-	if !opts.SecurePolicy {
+	// OCPSTRAT-1869: CLID-289:
+	// Signature mirroring: when mode is disk to mirror, the source image is in the oc-mirror cache.
+	// We don't need to verify signatures coming from the cache for 2 reasons:
+	// * hard to generate a policy and guess all policyRequirements for all images in the cache
+	// * the images in the cache have already been verified during mirror to disk workflow
+	if !opts.SecurePolicy || mode == DiskToMirror {
 		policy = &signature.Policy{Default: []signature.PolicyRequirement{signature.NewPRInsecureAcceptAnything()}}
 	} else if opts.PolicyPath == "" {
 		policy, err = signature.DefaultPolicy(nil)

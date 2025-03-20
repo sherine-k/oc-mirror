@@ -79,7 +79,7 @@ func (o *Mirror) copy(ctx context.Context, src, dest string, opts *CopyOptions) 
 		return err
 	}
 
-	policyContext, err := opts.Global.GetPolicyContext()
+	policyContext, err := opts.Global.GetPolicyContext(Mode(o.Mode))
 	if err != nil {
 		return fmt.Errorf("error loading trust policy: %v", err)
 	}
