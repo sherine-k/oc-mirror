@@ -13,6 +13,7 @@ import (
 	"github.com/containers/image/v5/types"
 	"github.com/google/go-containerregistry/pkg/registry"
 	"github.com/openshift/oc-mirror/v2/internal/pkg/common"
+	"github.com/openshift/oc-mirror/v2/internal/pkg/mirror/signatureconfig"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -240,6 +241,41 @@ func TestMirrorParseMultiArch(t *testing.T) {
 
 	_, err := parseMultiArch("other")
 	assert.Equal(t, "unknown multi-arch option \"other\". Choose one of the supported options: 'system', 'all', or 'index-only'", err.Error())
+}
+
+func TestSetRegistryConfiguration(t *testing.T) {
+	testFolder := t.TempDir()
+	global := &GlobalOptions{SecurePolicy: false, WorkingDir: testFolder}
+
+	_, sharedOpts := SharedImageFlags()
+	_, deprecatedTLSVerifyOpt := DeprecatedTLSVerifyFlags()
+	_, srcOpts := ImageSrcFlags(global, sharedOpts, deprecatedTLSVerifyOpt, "src-", "screds")
+
+	opts := CopyOptions{
+		Global:      global,
+		SrcImage:    srcOpts,
+		Destination: "docker://mymirror.org",
+		Mode:        MirrorToDisk,
+	}
+	policyContext, err := opts.Global.GetPolicyContext(Mode(opts.Mode))
+	assert.NoError(t, err)
+	defer func() {
+		if err := policyContext.Destroy(); err != nil {
+			t.Fatal(err)
+		}
+	}()
+
+	sourceCtx, err := opts.SrcImage.NewSystemContext()
+	assert.NoError(t, err)
+
+	signatureconfig.SetRegistryConfiguration(sourceCtx, opts.SrcImage.global.WorkingDir, opts.LocalStorageFQDN, opts.Destination)
+
+	expectedRegistriesD := filepath.Join(testFolder, "containers/registries.d")
+	assert.Equal(t, expectedRegistriesD, sourceCtx.RegistriesDirPath)
+
+	expectedCacheRegistryFile := filepath.Join(expectedRegistriesD, "localhost:55000.yaml")
+	assert.FileExists(t, expectedCacheRegistryFile)
+
 }
 
 // mock

@@ -15,6 +15,7 @@ import (
 	"github.com/containers/image/v5/transports/alltransports"
 	"github.com/containers/image/v5/types"
 	"github.com/distribution/reference"
+	"github.com/openshift/oc-mirror/v2/internal/pkg/mirror/signatureconfig"
 )
 
 type Mode string
@@ -74,7 +75,6 @@ func (o *MirrorDelete) DeleteImage(ctx context.Context, image string, co *CopyOp
 
 // copy - copy images setup and execute
 func (o *Mirror) copy(ctx context.Context, src, dest string, opts *CopyOptions) (retErr error) {
-
 	if err := ReexecIfNecessaryForImages([]string{src, dest}...); err != nil {
 		return err
 	}
@@ -105,6 +105,8 @@ func (o *Mirror) copy(ctx context.Context, src, dest string, opts *CopyOptions) 
 	if strings.Contains(src, opts.LocalStorageFQDN) { // when copying from cache, use HTTP
 		sourceCtx.DockerInsecureSkipTLSVerify = types.OptionalBoolTrue
 	}
+	// TODO move all this inside NewSystemContext
+	signatureconfig.SetRegistryConfiguration(sourceCtx, opts.SrcImage.global.WorkingDir, opts.LocalStorageFQDN, opts.Destination)
 
 	destinationCtx, err := opts.DestImage.NewSystemContext()
 	if err != nil {
