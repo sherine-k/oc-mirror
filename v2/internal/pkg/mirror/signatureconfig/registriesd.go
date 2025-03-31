@@ -12,6 +12,8 @@ import (
 	"github.com/containers/storage/pkg/fileutils"
 	"github.com/otiai10/copy"
 	"gopkg.in/yaml.v2"
+
+	"github.com/openshift/oc-mirror/v2/internal/pkg/consts"
 )
 
 var systemRegistriesDirPath = builtinRegistriesDirPath
@@ -106,13 +108,13 @@ func toFileName(registryURL string) string {
 }
 
 func addRegistry(customizableRegistriesDir, registryURL string) error {
-	if strings.HasPrefix(registryURL, fileProtocol) || strings.HasPrefix(registryURL, dirProtocol) || strings.HasPrefix(registryURL, ociProtocol) {
+	if strings.HasPrefix(registryURL, consts.FileProtocol) || strings.HasPrefix(registryURL, consts.DirProtocol) || strings.HasPrefix(registryURL, consts.OciProtocol) {
 		// no need to add a configuration file
 		// this is probably in mirrorToDisk where the destinationURL is a disk location
 		return nil
 	}
 
-	registryURL, _ = strings.CutPrefix(registryURL, dockerProtocol)
+	registryURL, _ = strings.CutPrefix(registryURL, consts.DockerProtocol)
 
 	// TODO: if file exists, and use-sigstore-attachements isn't configured, what do you do?
 	// override? append? exist in error?
