@@ -15,6 +15,7 @@ import (
 	"github.com/containers/image/v5/transports/alltransports"
 	"github.com/containers/image/v5/types"
 	"github.com/distribution/reference"
+
 	"github.com/openshift/oc-mirror/v2/internal/pkg/mirror/signatureconfig"
 )
 
@@ -106,7 +107,9 @@ func (o *Mirror) copy(ctx context.Context, src, dest string, opts *CopyOptions) 
 		sourceCtx.DockerInsecureSkipTLSVerify = types.OptionalBoolTrue
 	}
 	// TODO move all this inside NewSystemContext
-	signatureconfig.SetRegistryConfiguration(sourceCtx, opts.SrcImage.global.WorkingDir, opts.LocalStorageFQDN, opts.Destination)
+	if !opts.RemoveSignatures {
+		signatureconfig.SetRegistryConfiguration(sourceCtx, opts.SrcImage.global.WorkingDir, src, dest)
+	}
 
 	destinationCtx, err := opts.DestImage.NewSystemContext()
 	if err != nil {
@@ -115,6 +118,14 @@ func (o *Mirror) copy(ctx context.Context, src, dest string, opts *CopyOptions) 
 
 	if strings.Contains(dest, opts.LocalStorageFQDN) { // when copying to cache, use HTTP
 		destinationCtx.DockerInsecureSkipTLSVerify = types.OptionalBoolTrue
+	}
+
+	// TODO sourceCtx and destinationCtx only needs to set the field RegistriesDirPath, so it is possible to split SetRegistryConfiguration as following:
+	// one func to get the RegistriesDirPath and set in both sourceCtx and destinationCtx
+	// one func to copy content from the default to the new one under working-dir
+	// one func to add mandatory registries
+	if !opts.RemoveSignatures {
+		signatureconfig.SetRegistryConfiguration(destinationCtx, opts.DestImage.global.WorkingDir, src, dest)
 	}
 
 	var manifestType string

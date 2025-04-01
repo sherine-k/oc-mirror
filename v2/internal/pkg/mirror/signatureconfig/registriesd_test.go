@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/openshift/oc-mirror/v2/internal/pkg/parser"
+
 	"github.com/stretchr/testify/assert"
 )
 
@@ -15,7 +16,7 @@ func TestAddMandatoryRegistries(t *testing.T) {
 	expectedCacheRegistryFile := filepath.Join(testFolder, "localhost:55000.yaml")
 	expectedDestRegistryFile := filepath.Join(testFolder, "mymirror.com.yaml")
 
-	assert.NoError(t, addMandatoryRegistries(testFolder, "localhost:55000", "mymirror.com"))
+	assert.NoError(t, addMandatoryRegistries(testFolder, []string{"localhost:55000", "mymirror.com"}))
 
 	assert.FileExists(t, expectedCacheRegistryFile)
 	cfg, err := parser.ParseYamlFile[registryConfiguration](expectedCacheRegistryFile)
