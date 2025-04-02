@@ -1,4 +1,4 @@
-package signatureconfig
+package registriesd
 
 type registryConfiguration struct {
 	// The key is a namespace, using fully-expanded Docker reference format or parent namespaces (per dockerReference.PolicyConfiguration*),

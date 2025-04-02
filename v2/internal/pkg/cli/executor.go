@@ -48,6 +48,7 @@ import (
 	"github.com/openshift/oc-mirror/v2/internal/pkg/manifest"
 	"github.com/openshift/oc-mirror/v2/internal/pkg/mirror"
 	"github.com/openshift/oc-mirror/v2/internal/pkg/operator"
+	"github.com/openshift/oc-mirror/v2/internal/pkg/registriesd"
 	"github.com/openshift/oc-mirror/v2/internal/pkg/release"
 	"github.com/openshift/oc-mirror/v2/internal/pkg/spinners"
 	"github.com/openshift/oc-mirror/v2/internal/pkg/version"
@@ -782,6 +783,12 @@ func (o *ExecutorSchema) RunMirrorToDisk(cmd *cobra.Command, args []string) erro
 		return err
 	}
 
+	if !o.Opts.RemoveSignatures {
+		if err := registriesd.PrepareRegistrydCustomDir(o.Opts.Global.WorkingDir, collectorSchema.CopyImageSchemaMap.RegistriesHost); err != nil {
+			return err
+		}
+	}
+
 	if !o.Opts.IsDryRun {
 		err = o.RebuildCatalogs(cmd.Context(), collectorSchema)
 		if err != nil {
@@ -850,6 +857,12 @@ func (o *ExecutorSchema) RunMirrorToMirror(cmd *cobra.Command, args []string) er
 	collectorSchema, err := o.CollectAll(cmd.Context())
 	if err != nil {
 		return err
+	}
+
+	if !o.Opts.RemoveSignatures {
+		if err := registriesd.PrepareRegistrydCustomDir(o.Opts.Global.WorkingDir, collectorSchema.CopyImageSchemaMap.RegistriesHost); err != nil {
+			return err
+		}
 	}
 
 	// Apply max-nested-paths processing if MaxNestedPaths>0
@@ -953,6 +966,12 @@ func (o *ExecutorSchema) RunDiskToMirror(cmd *cobra.Command, args []string) erro
 	collectorSchema, err := o.CollectAll(cmd.Context())
 	if err != nil {
 		return err
+	}
+
+	if !o.Opts.RemoveSignatures {
+		if err := registriesd.PrepareRegistrydCustomDir(o.Opts.Global.WorkingDir, collectorSchema.CopyImageSchemaMap.RegistriesHost); err != nil {
+			return err
+		}
 	}
 
 	// apply max-nested-paths processing if MaxNestedPaths>0
@@ -1136,6 +1155,14 @@ func (o *ExecutorSchema) CollectAll(ctx context.Context) (v2alpha1.CollectorSche
 
 	collectorSchema.AllImages = allRelatedImages
 
+	if !o.Opts.RemoveSignatures {
+		if regHostMap, err := registryHostMap(&allRelatedImages); err != nil {
+			return v2alpha1.CollectorSchema{}, err
+		} else {
+			collectorSchema.CopyImageSchemaMap.RegistriesHost = regHostMap
+		}
+	}
+
 	endTime := time.Now()
 	execTime := endTime.Sub(startTime)
 	o.Log.Debug("collection time     : %v", execTime)
@@ -1271,4 +1298,41 @@ func addRebuiltCatalogs(cs v2alpha1.CollectorSchema) (v2alpha1.CollectorSchema, 
 		}
 	}
 	return cs, nil
+}
+
+func registryHostMap(allImages *[]v2alpha1.CopyImageSchema) (map[string]struct{}, error) {
+	var errs []error
+	registriesHost := make(map[string]struct{})
+
+	for _, image := range *allImages {
+		var srcHost, destHost string
+		var err error
+
+		if srcHost, err = extractHostName(image.Source); err != nil {
+			errs = append(errs, err)
+		} else {
+			registriesHost[srcHost] = struct{}{}
+		}
+
+		if destHost, err = extractHostName(image.Destination); err != nil {
+			errs = append(errs, err)
+		} else {
+			registriesHost[destHost] = struct{}{}
+		}
+	}
+
+	return registriesHost, errors.Join(errs...)
+}
+
+func extractHostName(input string) (string, error) {
+	splits := strings.SplitN(input, "://", 2)
+	if len(splits) < 2 {
+		return "", fmt.Errorf("invalid input format")
+	}
+	splits = strings.SplitN(splits[1], "/", 2)
+	if len(splits) < 2 {
+		return "", fmt.Errorf("invalid input format")
+	}
+
+	return splits[0], nil
 }
